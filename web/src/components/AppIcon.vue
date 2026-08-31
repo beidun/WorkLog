@@ -1,5 +1,5 @@
 <script setup lang="ts">
-defineProps<{ name: "overview" | "projects" | "report" | "review" | "settings" | "search" | "scan" | "close" | "arrow" | "source" }>();
+defineProps<{ name: "overview" | "projects" | "report" | "review" | "settings" | "search" | "scan" | "close" | "arrow" | "source" | "edit" | "save" | "restore" }>();
 </script>
 
 <template>
@@ -30,6 +30,15 @@ defineProps<{ name: "overview" | "projects" | "report" | "review" | "settings" |
     </template>
     <template v-else-if="name === 'arrow'">
       <path d="m9 5 7 7-7 7" />
+    </template>
+    <template v-else-if="name === 'edit'">
+      <path d="m4 20 4.2-1 10.6-10.6-3.2-3.2L5 15.8 4 20Z" /><path d="m13.8 7 3.2 3.2" />
+    </template>
+    <template v-else-if="name === 'save'">
+      <path d="M5 4h12l2 2v14H5V4Z" /><path d="M8 4v6h8V4M8 20v-6h8v6" />
+    </template>
+    <template v-else-if="name === 'restore'">
+      <path d="M4 8V4m0 0h4M4.6 4.6A9 9 0 1 1 3 14" />
     </template>
     <template v-else>
       <path d="M12 3.5 19.5 8v8L12 20.5 4.5 16V8L12 3.5Z" /><path d="m4.8 8.2 7.2 4.3 7.2-4.3M12 12.5v8" />

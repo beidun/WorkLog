@@ -18,6 +18,24 @@ export type WorkStatus =
   | "blocked"
   | "abandoned";
 
+export type SessionFactKind = "finding" | "change" | "validation" | "risk" | "next_step";
+
+export type WorkItemFeedbackType =
+  | "accurate"
+  | "title_wrong"
+  | "split_needed"
+  | "merge_needed"
+  | "status_wrong"
+  | "summary_wrong"
+  | "citation_wrong";
+
+export interface SessionFact {
+  kind: SessionFactKind;
+  text: string;
+  eventId: string;
+  confidence: number;
+}
+
 export interface SessionSeed {
   source: AgentSource;
   externalId: string;
@@ -71,10 +89,49 @@ export interface ScanStats {
   finishedAt?: string;
 }
 
+export interface SessionDigest {
+  sessionId: string;
+  inputHash: string;
+  objective: string;
+  headline: string;
+  progressSummary: string;
+  completed: string[];
+  validations: string[];
+  blockers: string[];
+  remaining: string[];
+  facts: SessionFact[];
+  status: WorkStatus;
+  confidence: number;
+  nextStep: string;
+  lastEventAt?: string;
+  provider: string;
+  evidence: Array<{ eventId: string; section: "objective" | "progress" | "completed" | "validation" | "blocker" | "remaining" | "finding" | "risk" | "next_step" }>;
+}
+
 export interface ProjectRow {
   id: string;
   name: string;
   root_path: string;
   git_remote: string | null;
   last_activity_at: string | null;
+}
+
+export interface RepositorySnapshotView {
+  id: string;
+  projectId: string;
+  capturedAt: string;
+  available: boolean;
+  state: "clean" | "dirty" | "empty" | "missing" | "not_git";
+  branch: string | null;
+  headCommit: string | null;
+  headSubject: string | null;
+  headCommittedAt: string | null;
+  upstream: string | null;
+  aheadCount: number;
+  behindCount: number;
+  stagedCount: number;
+  modifiedCount: number;
+  untrackedCount: number;
+  conflictedCount: number;
+  changedFiles: string[];
 }

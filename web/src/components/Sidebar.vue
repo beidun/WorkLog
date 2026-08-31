@@ -19,7 +19,7 @@ const items = [
       <span>Worklog</span>
     </button>
     <nav class="primary-nav" aria-label="主导航">
-      <button v-for="item in items" :key="item.id" :class="['nav-item', { active: active === item.id }]" @click="emit('navigate', item.id)">
+      <button v-for="item in items" :key="item.id" :aria-label="item.label" :class="['nav-item', { active: active === item.id }]" @click="emit('navigate', item.id)">
         <AppIcon :name="item.icon" />
         <span>{{ item.label }}</span>
       </button>
@@ -33,7 +33,7 @@ const items = [
         <span class="source-count">{{ source.count }}</span>
       </div>
     </div>
-    <button class="nav-item settings" @click="emit('navigate', 'settings')">
+    <button aria-label="设置" :class="['nav-item', 'settings', { active: active === 'settings' }]" @click="emit('navigate', 'settings')">
       <AppIcon name="settings" /><span>设置</span>
     </button>
   </aside>

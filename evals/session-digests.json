@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "explicit-finding",
+      "description": "带具体数量的结论应成为可引用事实",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "龙虎榜接口有哪些" },
+        { "id": "answer", "type": "assistant_message", "role": "assistant", "content": "当前 zsx-dev 分支共有 3 个龙虎榜接口，均支持 GET 和 POST。", "metadata": { "phase": "final_answer" } },
+        { "id": "completed", "type": "task_completed" }
+      ],
+      "expected": {
+        "headline": "核查龙虎榜接口有哪些",
+        "status": "verified",
+        "factIncludes": [{ "kind": "finding", "textIncludes": "共有 3 个龙虎榜接口", "eventId": "answer" }],
+        "citationEventIds": ["answer"]
+      }
+    },
+    {
+      "id": "audit-result",
+      "description": "审核结论应保留发布风险",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "审核新增文档" },
+        { "id": "answer", "type": "assistant_message", "role": "assistant", "content": "审核结果：4 份新增文档仍有发布前备注，暂不建议发布。" },
+        { "id": "completed", "type": "task_completed" }
+      ],
+      "expected": {
+        "status": "verified",
+        "factIncludes": [{ "kind": "finding", "textIncludes": "4 份新增文档", "eventId": "answer" }],
+        "citationEventIds": ["answer"]
+      }
+    },
+    {
+      "id": "validation-and-change",
+      "description": "修改与通过的测试应分别进入事实",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "实现并验证增量扫描" },
+        { "id": "edit", "type": "tool_call", "toolName": "apply_patch", "toolCallId": "edit-1", "filePaths": ["src/scanner.ts"] },
+        { "id": "edit-result", "type": "tool_result", "toolCallId": "edit-1", "content": "Done" },
+        { "id": "test", "type": "tool_call", "toolName": "exec_command", "toolCallId": "test-1", "command": "bun test" },
+        { "id": "test-result", "type": "tool_result", "toolCallId": "test-1", "content": "41 pass" },
+        { "id": "answer", "type": "assistant_message", "role": "assistant", "content": "增量扫描已经修复，41 项测试全部通过。", "metadata": { "phase": "final_answer" } },
+        { "id": "completed", "type": "task_completed" }
+      ],
+      "expected": {
+        "status": "verified",
+        "factIncludes": [
+          { "kind": "change", "textIncludes": "src/scanner.ts" },
+          { "kind": "validation", "textIncludes": "bun test" }
+        ],
+        "citationEventIds": ["answer", "test-result"]
+      }
+    },
+    {
+      "id": "resolution-after-tools",
+      "description": "工具检查后没有 task_completed 也要识别明确结论",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "当前机器不能查，你用 ssh 帮我看看" },
+        { "id": "check", "type": "tool_call", "toolName": "exec_command", "toolCallId": "check-1", "command": "ssh server check-data" },
+        { "id": "check-result", "type": "tool_result", "toolCallId": "check-1", "content": "checked" },
+        { "id": "answer", "type": "assistant_message", "role": "assistant", "content": "好的。数据正常，不需要重爬或修改。" }
+      ],
+      "expected": {
+        "status": "verified",
+        "factIncludes": [{ "kind": "finding", "textIncludes": "数据正常", "eventId": "answer" }],
+        "citationEventIds": ["answer"]
+      }
+    },
+    {
+      "id": "noise-filter",
+      "description": "模型错误和工具包装不应成为进度事实",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "检查接口数据质量" },
+        { "id": "answer", "type": "assistant_message", "role": "assistant", "content": "结论：接口数据检查完成，未发现重复或缺失。" },
+        { "id": "noise", "type": "assistant_message", "role": "assistant", "content": "API Error: context window exceeded" },
+        { "id": "completed", "type": "task_completed" }
+      ],
+      "expected": {
+        "status": "verified",
+        "factIncludes": [{ "kind": "finding", "textIncludes": "未发现重复或缺失", "eventId": "answer" }],
+        "factExcludes": ["API Error"],
+        "citationEventIds": ["answer"]
+      }
+    },
+    {
+      "id": "open-turn",
+      "description": "只有 commentary 的进行中会话不能提前标记完成",
+      "events": [
+        { "id": "request", "type": "user_message", "role": "user", "content": "优化历史扫描器" },
+        { "id": "edit", "type": "tool_call", "toolName": "apply_patch", "toolCallId": "edit-1", "filePaths": ["src/scanner.ts"] },
+        { "id": "edit-result", "type": "tool_result", "toolCallId": "edit-1", "content": "Done" },
+        { "id": "commentary", "type": "assistant_message", "role": "assistant", "content": "基础修改已完成，接下来继续跑完整历史回归。", "metadata": { "phase": "commentary" } }
+      ],
+      "expected": {
+        "status": "partially_done",
+        "nextStepEmpty": false,
+        "factIncludes": [{ "kind": "next_step", "textIncludes": "完整历史回归", "eventId": "commentary" }],
+        "citationEventIds": ["commentary"]
+      }
+    }
+  ]
+}

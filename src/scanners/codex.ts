@@ -103,6 +103,7 @@ export class CodexAdapter implements HistoryAdapter {
       return [{ event: eventFrom(path, line, raw, sessionId, {
         key: stringValue(payload.id), type: role === "user" ? "user_message" : "assistant_message",
         role, timestamp, content: truncate(cleaned), cwd: state.session.cwd,
+        metadata: role === "assistant" ? { phase: stringValue(payload.phase) } : undefined,
       }) }];
     }
 

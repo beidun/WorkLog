@@ -25,20 +25,23 @@ describe("history adapters", () => {
     const file = join(codex, "sessions", "2026", "08", "12", "rollout-2026-08-12T00-00-00-11111111-1111-4111-8111-111111111111.jsonl");
     await Bun.write(file, [
       { type: "session_meta", timestamp: "2026-08-12T00:00:00Z", payload: { id: "11111111-1111-4111-8111-111111111111", cwd: root } },
+      { type: "response_item", timestamp: "2026-08-12T00:00:30Z", payload: { type: "message", id: "msg-1", role: "assistant", phase: "commentary", content: [{ type: "output_text", text: "正在处理" }] } },
       { type: "response_item", timestamp: "2026-08-12T00:01:00Z", payload: { type: "function_call", id: "call-row", call_id: "call-1", name: "exec_command", arguments: JSON.stringify({ cmd: "bun test", workdir: root }) } },
       { type: "response_item", timestamp: "2026-08-12T00:01:01Z", payload: { type: "function_call_output", call_id: "call-1", output: JSON.stringify({ exit_code: 0, output: "2 pass" }) } },
     ].map(JSON.stringify).join("\n") + "\n");
     const db = new WorklogDatabase(join(root, "worklog.sqlite"));
     const stats = await scanHistories(db, [new CodexAdapter(codex)]);
-    expect(stats.eventsUpserted).toBe(2);
-    const rows = db.db.query("SELECT event_type, tool_call_id, is_error FROM events ORDER BY source_line").all() as any[];
+    expect(stats.eventsUpserted).toBe(3);
+    const rows = db.db.query("SELECT event_type, tool_call_id, is_error FROM events WHERE event_type != 'assistant_message' ORDER BY source_line").all() as any[];
     expect(rows).toEqual([
       { event_type: "tool_call", tool_call_id: "call-1", is_error: 0 },
       { event_type: "tool_result", tool_call_id: "call-1", is_error: 0 },
     ]);
+    expect(db.db.query("SELECT metadata_json FROM events WHERE event_type = 'assistant_message'").get())
+      .toEqual({ metadata_json: '{"phase":"commentary"}' });
     const again = await scanHistories(db, [new CodexAdapter(codex)]);
     expect(again.filesSkipped).toBe(1);
-    expect(db.db.query("SELECT COUNT(*) AS count FROM events").get()).toEqual({ count: 2 });
+    expect(db.db.query("SELECT COUNT(*) AS count FROM events").get()).toEqual({ count: 3 });
 
     appendFileSync(file, `${JSON.stringify({
       type: "response_item",

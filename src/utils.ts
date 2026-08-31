@@ -59,3 +59,22 @@ export function redactSecrets(value: string): string {
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]{16,}/gi, "$1[REDACTED_TOKEN]")
     .replace(/((?:api[_-]?key|token|password|secret)\s*[=:]\s*)[^\s,;]+/gi, "$1[REDACTED]");
 }
+
+function redactJsonFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactJsonFields);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, entry]) => {
+    if (/(?:encrypted_content|signature|password|passwd|secret|token|api[_-]?key|authorization|cookie)/i.test(key)) {
+      return [key, "[REDACTED]"];
+    }
+    return [key, redactJsonFields(entry)];
+  }));
+}
+
+export function redactRawEvidence(value: string): string {
+  try {
+    return redactSecrets(JSON.stringify(redactJsonFields(JSON.parse(value))));
+  } catch {
+    return redactSecrets(value);
+  }
+}

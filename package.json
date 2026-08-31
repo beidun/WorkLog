@@ -11,6 +11,9 @@
     "scan": "bun src/cli.ts scan",
     "status": "bun src/cli.ts status",
     "daily": "bun src/cli.ts daily",
+    "eval": "bun src/cli.ts eval",
+    "eval:score": "bun src/cli.ts eval-score",
+    "eval:export": "bun src/cli.ts export-eval",
     "test": "bun test",
     "typecheck": "tsc --noEmit && vue-tsc --noEmit"
   },

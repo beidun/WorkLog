@@ -7,8 +7,11 @@ import EvidenceModal from "./components/EvidenceModal.vue";
 import MetricStrip from "./components/MetricStrip.vue";
 import ProjectDetail from "./components/ProjectDetail.vue";
 import ProjectTable from "./components/ProjectTable.vue";
+import ProviderSettings from "./components/ProviderSettings.vue";
+import ReviewQueue from "./components/ReviewQueue.vue";
 import Sidebar from "./components/Sidebar.vue";
-import type { EvidenceRef, Overview, ProjectDetailResponse, ProjectSummary, TimelineEvent } from "./types";
+import WorkReportView from "./components/WorkReport.vue";
+import type { EvidenceRef, Overview, ProjectDetailResponse, ProjectSummary, ReviewQueueItem, TimelineEvent, WorkItemEvalScore, WorkReport, WorkReportRange } from "./types";
 
 const overview = ref<Overview | null>(null);
 const activeSection = ref("overview");
@@ -19,11 +22,21 @@ const error = ref("");
 const scanning = ref(false);
 const scanLabel = ref("扫描新记录");
 const detail = ref<ProjectDetailResponse | null>(null);
+const detailFocusId = ref<string | null>(null);
 const detailLoading = ref(false);
 const evidence = ref<Record<string, any> | null>(null);
 const evidenceOpen = ref(false);
 const evidenceLoading = ref(false);
-const dailyReport = ref<Record<string, any> | null>(null);
+const workReport = ref<WorkReport | null>(null);
+const reportRange = ref<WorkReportRange>("today");
+const reportLoading = ref(false);
+const reportError = ref("");
+const reviewItems = ref<ReviewQueueItem[]>([]);
+const reviewScore = ref<WorkItemEvalScore | null>(null);
+const reviewLoading = ref(false);
+const reviewError = ref("");
+const reviewExporting = ref(false);
+const reviewExportMessage = ref("");
 
 const filteredProjects = computed(() => {
   if (!overview.value) return [];
@@ -60,16 +73,31 @@ async function startScan() {
       if (!state.running) break;
     }
     await loadOverview();
+    if (activeSection.value === "reports") await loadWorkReport(reportRange.value);
   } finally {
     scanning.value = false;
     scanLabel.value = "扫描新记录";
   }
 }
 
-async function openProject(project: ProjectSummary) {
+async function openProject(project: ProjectSummary, focusWorkItemId: string | null = null) {
+  detailFocusId.value = focusWorkItemId;
   detailLoading.value = true;
   detail.value = await api.project(project.id);
   detailLoading.value = false;
+}
+
+async function refreshProject() {
+  const projectId = detail.value?.project.id;
+  if (!projectId) return;
+  detailLoading.value = true;
+  try {
+    detail.value = await api.project(projectId);
+    workReport.value = null;
+    await Promise.all([loadOverview(), activeSection.value === "review" ? loadReviewQueue() : Promise.resolve()]);
+  } finally {
+    detailLoading.value = false;
+  }
 }
 
 async function openEvidence(event: Pick<TimelineEvent, "id"> | Pick<EvidenceRef, "id">) {
@@ -81,7 +109,86 @@ async function openEvidence(event: Pick<TimelineEvent, "id"> | Pick<EvidenceRef,
 
 async function navigate(section: string) {
   activeSection.value = section;
-  if (section === "reports") dailyReport.value = await api.daily();
+  if (section === "reports" && !workReport.value) await loadWorkReport(reportRange.value);
+  if (section === "review") await loadReviewQueue();
+}
+
+async function loadReviewQueue() {
+  reviewLoading.value = true;
+  reviewError.value = "";
+  try {
+    const [queue, score] = await Promise.all([api.reviewQueue(), api.evalScore()]);
+    reviewItems.value = queue.items;
+    reviewScore.value = score;
+  } catch (reason) {
+    reviewError.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    reviewLoading.value = false;
+  }
+}
+
+async function openReviewProject(projectId: string, workItemId: string) {
+  const project = overview.value?.projects.find((item) => item.id === projectId);
+  if (project) await openProject(project, workItemId);
+}
+
+async function openAttentionProject(projectId: string, workItemId: string) {
+  const project = overview.value?.projects.find((item) => item.id === projectId);
+  if (project) await openProject(project, workItemId);
+}
+
+async function openProgressChange(change: { projectId: string; workItemId: string }) {
+  const project = overview.value?.projects.find((item) => item.id === change.projectId);
+  if (project) await openProject(project, change.workItemId);
+}
+
+async function openReportProject(target: { projectId: string; workItemId: string }) {
+  const project = overview.value?.projects.find((item) => item.id === target.projectId);
+  if (project) await openProject(project, target.workItemId);
+}
+
+function changeLabel(type: string): string {
+  return ({
+    started: "新事项",
+    progress_updated: "进展更新",
+    completed: "已完成",
+    validation_added: "新增验证",
+    blocker_added: "出现阻塞",
+    blocker_resolved: "阻塞解除",
+  } as Record<string, string>)[type] ?? "进度变化";
+}
+
+async function exportReviewSamples() {
+  reviewExporting.value = true;
+  reviewExportMessage.value = "";
+  try {
+    const suite = await api.exportEval();
+    const blob = new Blob([JSON.stringify(suite, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `work-items-eval-${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    reviewExportMessage.value = `已导出 ${suite.cases.length} 条已标注样本`;
+  } catch (reason) {
+    reviewExportMessage.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    reviewExporting.value = false;
+  }
+}
+
+async function loadWorkReport(range: WorkReportRange) {
+  reportRange.value = range;
+  reportLoading.value = true;
+  reportError.value = "";
+  try {
+    workReport.value = await api.workReport(range);
+  } catch (reason) {
+    reportError.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    reportLoading.value = false;
+  }
 }
 
 onMounted(loadOverview);
@@ -93,7 +200,7 @@ onMounted(loadOverview);
     <main class="main-area">
       <header class="topbar">
         <div class="search-box"><AppIcon name="search" /><input v-model="query" aria-label="搜索项目" placeholder="搜索项目或工作事项" /></div>
-        <button class="scan-button" :disabled="scanning" @click="startScan"><AppIcon name="scan" /><span>{{ scanLabel }}</span></button>
+        <button class="scan-button" aria-label="扫描新记录" :disabled="scanning" @click="startScan"><AppIcon name="scan" /><span>{{ scanLabel }}</span></button>
       </header>
 
       <div v-if="loading" class="page-loading"><span></span><p>正在读取本地工作记录…</p></div>
@@ -114,33 +221,36 @@ onMounted(loadOverview);
                 </div>
               </div>
               <ProjectTable :projects="filteredProjects" :status-labels="overview.statusLabels" @select="openProject" />
+              <section v-if="activeSection === 'overview' && overview.recentChanges?.length" class="overview-changes">
+                <div class="section-heading"><div><span>扫描对比</span><h2>最近变化</h2></div><small>最近一次完整扫描</small></div>
+                <article v-for="change in overview.recentChanges" :key="change.id" tabindex="0" role="button"
+                  @click="openProgressChange(change)"
+                  @keydown.enter="openProgressChange(change)"
+                  @keydown.space.prevent="openProgressChange(change)">
+                  <span :class="['change-dot', change.changeType]"></span>
+                  <div><strong>{{ changeLabel(change.changeType) }} · {{ change.title }}</strong><p>{{ change.projectName }} · {{ new Date(change.detectedAt).toLocaleString('zh-CN') }}</p></div>
+                  <button v-if="change.evidenceIds[0]" @click.stop="openEvidence({ id: change.evidenceIds[0] })">证据</button>
+                </article>
+              </section>
             </section>
-            <AttentionRail v-if="activeSection === 'overview'" :items="overview.attention" :status-labels="overview.statusLabels" :scan="overview.scan" />
+            <AttentionRail v-if="activeSection === 'overview'" :items="overview.attention" :status-labels="overview.statusLabels" :scan="overview.scan" @project="openAttentionProject" />
           </div>
         </section>
 
-        <section v-else-if="activeSection === 'reports'" class="report-page">
-          <div class="page-intro"><div><h1>今日工作总结</h1><p>按项目汇总今天发生的工作与验证结果。</p></div><time>{{ dailyReport?.date }}</time></div>
-          <div class="report-sheet">
-            <header><div><span>{{ dailyReport?.projectCount ?? 0 }}</span><p>今日涉及项目</p></div><div><span>{{ dailyReport?.items?.length ?? 0 }}</span><p>工作事项</p></div></header>
-            <section v-for="item in dailyReport?.items ?? []" :key="item.id" class="report-entry">
-              <p>{{ item.project_name }}</p><h2>{{ item.title }}</h2><span>{{ item.summary }}</span><small>下一步：{{ item.next_step }}</small>
-              <div class="citation-list">
-                <button v-for="(citation, index) in item.evidence ?? []" :key="citation.id" @click="openEvidence(citation)">[{{ Number(index) + 1 }}] {{ citation.source === 'codex' ? 'Codex' : 'Claude Code' }} · L{{ citation.source_line }}</button>
-              </div>
-            </section>
-            <div v-if="!dailyReport?.items?.length" class="report-empty">今天尚未发现可以汇总的工作事项。</div>
-          </div>
-        </section>
+        <WorkReportView v-else-if="activeSection === 'reports'" :report="workReport" :range="reportRange" :loading="reportLoading" :error="reportError" @range="loadWorkReport" @evidence="openEvidence" @project="openReportProject" />
+
+        <ProviderSettings v-else-if="activeSection === 'settings'" />
+
+        <ReviewQueue v-else-if="activeSection === 'review'" :items="reviewItems" :score="reviewScore" :loading="reviewLoading || reviewExporting" :error="reviewError" :message="reviewExportMessage" @project="openReviewProject" @export="exportReviewSamples" />
 
         <section v-else class="placeholder-page">
-          <h1>{{ activeSection === 'review' ? '待确认' : '设置' }}</h1>
-          <p>{{ activeSection === 'review' ? '自动合并与项目归属的人工确认入口将在下一个原型迭代开放。' : '数据源排除规则与模型 Provider 配置将在这里管理。' }}</p>
+          <h1>设置</h1>
+          <p>数据源排除规则与模型 Provider 配置将在这里管理。</p>
         </section>
       </template>
     </main>
 
-    <ProjectDetail v-if="detail" :detail="detail" :loading="detailLoading" @close="detail = null" @evidence="openEvidence" />
+    <ProjectDetail v-if="detail" :detail="detail" :focus-work-item-id="detailFocusId" :loading="detailLoading" @close="detail = null; detailFocusId = null" @evidence="openEvidence" @changed="refreshProject" />
     <EvidenceModal v-if="evidenceOpen" :data="evidence" :loading="evidenceLoading" @close="evidenceOpen = false; evidence = null" />
   </div>
 </template>

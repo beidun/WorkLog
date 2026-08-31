@@ -8,7 +8,7 @@ const emit = defineEmits<{ close: [] }>();
 <template>
   <div class="modal-backdrop" @click.self="emit('close')">
     <section class="evidence-modal" role="dialog" aria-modal="true" aria-label="原始证据">
-      <header><div><p>原始证据</p><h2>{{ data?.event?.tool_name || data?.event?.event_type || '加载中' }}</h2></div><button class="icon-button" @click="emit('close')"><AppIcon name="close" /></button></header>
+      <header><div><p>原始证据</p><h2>{{ data?.event?.tool_name || data?.event?.event_type || '加载中' }}</h2></div><button class="icon-button" aria-label="关闭证据" @click="emit('close')"><AppIcon name="close" /></button></header>
       <div v-if="loading" class="modal-loading">正在读取本地证据…</div>
       <template v-else-if="data">
         <div class="evidence-location"><span>{{ data.event.source }}</span><code>{{ data.event.source_file }}:{{ data.event.source_line }}</code></div>

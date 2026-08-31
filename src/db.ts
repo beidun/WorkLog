@@ -85,6 +85,50 @@ export class WorklogDatabase {
         FOREIGN KEY(project_id) REFERENCES projects(id)
       );
 
+      CREATE TABLE IF NOT EXISTS session_digests (
+        session_id TEXT PRIMARY KEY,
+        input_hash TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        progress_summary TEXT NOT NULL,
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        validations_json TEXT NOT NULL DEFAULT '[]',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        next_step TEXT NOT NULL DEFAULT '',
+        last_event_at TEXT,
+        provider TEXT NOT NULL DEFAULT 'deterministic-v1',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS session_digest_evidence (
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        digest_section TEXT NOT NULL,
+        rank INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(session_id, event_id, digest_section),
+        FOREIGN KEY(session_id) REFERENCES session_digests(session_id) ON DELETE CASCADE,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS session_facts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        fact_kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        rank INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(session_id, event_id, fact_kind, text),
+        FOREIGN KEY(session_id) REFERENCES session_digests(session_id) ON DELETE CASCADE,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS work_items (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -108,6 +152,63 @@ export class WorklogDatabase {
         FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS work_segments (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        input_hash TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        progress_summary TEXT NOT NULL,
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        validations_json TEXT NOT NULL DEFAULT '[]',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        next_step TEXT NOT NULL DEFAULT '',
+        last_event_at TEXT,
+        provider TEXT NOT NULL DEFAULT 'deterministic-v1',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(session_id, ordinal),
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS work_segment_evidence (
+        segment_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        digest_section TEXT NOT NULL,
+        rank INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(segment_id, event_id, digest_section),
+        FOREIGN KEY(segment_id) REFERENCES work_segments(id) ON DELETE CASCADE,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS work_segment_facts (
+        id TEXT PRIMARY KEY,
+        segment_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        fact_kind TEXT NOT NULL,
+        text TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        rank INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        UNIQUE(segment_id, event_id, fact_kind, text),
+        FOREIGN KEY(segment_id) REFERENCES work_segments(id) ON DELETE CASCADE,
+        FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS work_item_segments (
+        work_item_id TEXT NOT NULL,
+        segment_id TEXT NOT NULL,
+        PRIMARY KEY(work_item_id, segment_id),
+        FOREIGN KEY(work_item_id) REFERENCES work_items(id) ON DELETE CASCADE,
+        FOREIGN KEY(segment_id) REFERENCES work_segments(id) ON DELETE CASCADE
+      );
+
       CREATE TABLE IF NOT EXISTS work_item_evidence (
         work_item_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
@@ -117,12 +218,169 @@ export class WorklogDatabase {
         FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS work_item_corrections (
+        id TEXT PRIMARY KEY,
+        anchor_session_id TEXT NOT NULL UNIQUE,
+        source_work_item_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        next_step TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(anchor_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS project_corrections (
+        id TEXT PRIMARY KEY,
+        anchor_session_id TEXT NOT NULL UNIQUE,
+        source_work_item_id TEXT NOT NULL,
+        source_project_id TEXT NOT NULL,
+        target_project_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(anchor_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY(source_project_id) REFERENCES projects(id),
+        FOREIGN KEY(target_project_id) REFERENCES projects(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS work_item_feedback (
+        id TEXT PRIMARY KEY,
+        anchor_session_id TEXT NOT NULL,
+        source_work_item_id TEXT NOT NULL,
+        feedback_type TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(anchor_session_id, feedback_type),
+        FOREIGN KEY(anchor_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS progress_snapshots (
+        id TEXT PRIMARY KEY,
+        captured_at TEXT NOT NULL,
+        scan_started_at TEXT,
+        scan_finished_at TEXT,
+        item_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS work_item_snapshots (
+        snapshot_id TEXT NOT NULL,
+        work_item_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        status TEXT NOT NULL,
+        next_step TEXT NOT NULL DEFAULT '',
+        last_activity_at TEXT,
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        validations_json TEXT NOT NULL DEFAULT '[]',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+        session_ids_json TEXT NOT NULL DEFAULT '[]',
+        PRIMARY KEY(snapshot_id, work_item_id),
+        FOREIGN KEY(snapshot_id) REFERENCES progress_snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS progress_changes (
+        id TEXT PRIMARY KEY,
+        snapshot_id TEXT NOT NULL,
+        previous_snapshot_id TEXT,
+        project_id TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        work_item_id TEXT NOT NULL,
+        change_type TEXT NOT NULL,
+        title TEXT NOT NULL,
+        before_json TEXT,
+        after_json TEXT NOT NULL,
+        evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+        detected_at TEXT NOT NULL,
+        FOREIGN KEY(snapshot_id) REFERENCES progress_snapshots(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS repository_snapshots (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        available INTEGER NOT NULL DEFAULT 0,
+        state TEXT NOT NULL,
+        state_hash TEXT NOT NULL,
+        branch TEXT,
+        head_commit TEXT,
+        head_subject TEXT,
+        head_committed_at TEXT,
+        upstream TEXT,
+        ahead_count INTEGER NOT NULL DEFAULT 0,
+        behind_count INTEGER NOT NULL DEFAULT 0,
+        staged_count INTEGER NOT NULL DEFAULT 0,
+        modified_count INTEGER NOT NULL DEFAULT 0,
+        untracked_count INTEGER NOT NULL DEFAULT 0,
+        conflicted_count INTEGER NOT NULL DEFAULT 0,
+        changed_files_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+
       CREATE INDEX IF NOT EXISTS idx_sessions_project_activity ON sessions(project_id, ended_at DESC);
       CREATE INDEX IF NOT EXISTS idx_events_session_line ON events(session_id, source_line);
       CREATE INDEX IF NOT EXISTS idx_events_project_time ON events(project_id, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_events_tool_call ON events(session_id, tool_call_id);
+      CREATE INDEX IF NOT EXISTS idx_session_digests_status ON session_digests(status, last_event_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_session_facts_session_kind ON session_facts(session_id, fact_kind, rank);
       CREATE INDEX IF NOT EXISTS idx_work_items_project_status ON work_items(project_id, status, last_activity_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_work_segments_session_range ON work_segments(session_id, start_line, end_line);
+      CREATE INDEX IF NOT EXISTS idx_work_item_segments_item ON work_item_segments(work_item_id, segment_id);
+      CREATE INDEX IF NOT EXISTS idx_work_item_corrections_updated ON work_item_corrections(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_project_corrections_updated ON project_corrections(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_work_item_feedback_updated ON work_item_feedback(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_progress_snapshots_time ON progress_snapshots(captured_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_work_item_snapshots_project ON work_item_snapshots(snapshot_id, project_id);
+      CREATE INDEX IF NOT EXISTS idx_progress_changes_snapshot ON progress_changes(snapshot_id, detected_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_repository_snapshots_project_time ON repository_snapshots(project_id, captured_at DESC);
     `);
+    this.migrateWorkItemFeedback();
+  }
+
+  private migrateWorkItemFeedback(): void {
+    const columns = this.db.query("PRAGMA table_info(work_item_feedback)").all() as Array<{ name: string }>;
+    if (columns.some((column) => column.name === "anchor_session_id")) return;
+    const legacyRows = this.db.query("SELECT * FROM work_item_feedback ORDER BY updated_at").all() as Array<Record<string, unknown>>;
+    this.db.transaction(() => {
+      this.db.run("ALTER TABLE work_item_feedback RENAME TO work_item_feedback_legacy");
+      this.db.run(`
+        CREATE TABLE work_item_feedback (
+          id TEXT PRIMARY KEY,
+          anchor_session_id TEXT NOT NULL,
+          source_work_item_id TEXT NOT NULL,
+          feedback_type TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(anchor_session_id, feedback_type),
+          FOREIGN KEY(anchor_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+        )
+      `);
+      for (const row of legacyRows) {
+        const workItemId = String(row.work_item_id);
+        const anchor = this.db.query(`
+          SELECT s.id FROM work_item_sessions wis JOIN sessions s ON s.id=wis.session_id
+          WHERE wis.work_item_id=? ORDER BY COALESCE(s.started_at,s.ended_at,s.created_at),s.id LIMIT 1
+        `).get(workItemId) as { id: string } | null;
+        if (!anchor) continue;
+        this.db.query(`
+          INSERT INTO work_item_feedback(id,anchor_session_id,source_work_item_id,feedback_type,note,created_at,updated_at)
+          VALUES (?,?,?,?,?,?,?)
+          ON CONFLICT(anchor_session_id,feedback_type) DO UPDATE SET source_work_item_id=excluded.source_work_item_id,
+            note=excluded.note,updated_at=excluded.updated_at
+        `).run(String(row.id), anchor.id, workItemId, String(row.feedback_type), String(row.note ?? ""), String(row.created_at), String(row.updated_at));
+      }
+      this.db.run("DROP TABLE work_item_feedback_legacy");
+      this.db.run("CREATE INDEX IF NOT EXISTS idx_work_item_feedback_updated ON work_item_feedback(updated_at DESC)");
+      this.db.run("CREATE INDEX IF NOT EXISTS idx_work_item_feedback_anchor ON work_item_feedback(anchor_session_id, feedback_type)");
+    })();
   }
 
   getFileCursor(path: string): { size: number; mtime_ms: number; last_offset: number; last_line: number } | null {
