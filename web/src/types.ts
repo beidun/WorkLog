@@ -26,6 +26,9 @@ export interface ProjectProgressItem {
   confidence: number;
   evidenceCount: number;
   evidenceIds: string[];
+  agentProvider?: string;
+  agentUpdatedAt?: string;
+  agentEvidenceIds?: string[];
 }
 
 export interface ProjectWorkstream {
@@ -43,6 +46,8 @@ export interface ProjectWorkstream {
 export interface ProjectProgress {
   stage: ProjectProgressStage;
   stageLabel: string;
+  agentStage?: ProjectProgressStage;
+  agentStageLabel?: string;
   headline: string;
   summary: string;
   counts: { total: number; planned: number; active: number; completed: number; unverified: number; blocked: number };
@@ -53,6 +58,7 @@ export interface ProjectProgress {
   nextSteps: Array<{ text: string; workItemId: string; evidenceIds: string[] }>;
   evidence: EvidenceRef[];
   confidence: number;
+  agent?: { headline: string; summary: string; stage: ProjectProgressStage; stageLabel: string; completed: string[]; validations: string[]; blockers: string[]; remaining: string[]; provider: string; updatedAt: string; evidenceIds: string[]; nextSteps: Array<{ text: string; workItemId?: string }> };
 }
 
 export type WorkStatus = "planned" | "in_progress" | "partially_done" | "done_unverified" | "verified" | "blocked" | "abandoned";
@@ -93,13 +99,47 @@ export interface AttentionItem {
 export interface Overview {
   generatedAt: string;
   metrics: { projects: number; active: number; verifiedToday: number; needsAttention: number };
+  agentCoverage: {
+    provider?: string;
+    sessions: { total: number; enhanced: number };
+    workItems: { total: number; enhanced: number };
+    projects: { total: number; enhanced: number };
+  };
   projects: ProjectSummary[];
   attention: AttentionItem[];
   sourceCounts: Array<{ source: string; count: number }>;
   scan: Array<{ source: string; files: number; errors: number; last_scan: string }>;
   recentChanges: ProgressChangeSummary[];
   statusLabels: Record<string, string>;
-  llmProvider?: { enabled: boolean; mode: "off" | "local" | "remote"; name?: string; model?: string; endpoint?: string };
+  llmProvider?: { enabled: boolean; mode: "off" | "local" | "remote"; name?: string; model?: string; endpoint?: string; protocol?: string };
+}
+
+export interface AgentRun {
+  id: string;
+  session_id: string;
+  scope: "session" | "work_item" | "project";
+  project_id: string | null;
+  work_item_id: string | null;
+  provider: string;
+  status: "running" | "completed" | "failed";
+  attempts: number;
+  started_at: string;
+  ended_at: string | null;
+  error: string | null;
+}
+
+export interface AgentRunStep {
+  ordinal: number;
+  phase: "observe" | "plan" | "reason" | "verify" | "commit";
+  status: "started" | "completed" | "retrying" | "failed";
+  attempt: number;
+  at: string;
+  detail: string;
+}
+
+export interface AgentRunDetails {
+  run: AgentRun;
+  steps: AgentRunStep[];
 }
 
 export interface ProgressChangeSummary {
@@ -147,6 +187,19 @@ export interface WorkReportProject {
   items: WorkReportItem[];
   carryoverItems: WorkReportItem[];
   counts: { active: number; completed: number; unverified: number; blocked: number; validations: number };
+  agent?: {
+    headline: string;
+    summary: string;
+    stage: string;
+    provider: string;
+    updatedAt: string;
+    completed: string[];
+    validations: string[];
+    blockers: string[];
+    remaining: string[];
+    evidenceIds: string[];
+    evidence: EvidenceRef[];
+  };
 }
 
 export interface WorkReport {
@@ -183,13 +236,16 @@ export interface LlmSettings {
   mode: LlmMode;
   baseUrl: string;
   model: string;
+  protocol: "chat_completions" | "responses" | "anthropic_messages";
   allowRemote: boolean;
   timeoutMs: number;
   maxInputChars: number;
   maxSessionsPerScan: number;
+  maxWorkItemsPerScan: number;
+  maxProjectsPerScan: number;
   retryFailed: boolean;
   hasApiKey: boolean;
-  source: "env" | "file" | "default";
+  source: "env" | "file" | "ccswitch" | "default";
   environmentOverrides: string[];
 }
 
@@ -197,12 +253,15 @@ export interface LlmSettingsPayload {
   mode: LlmMode;
   baseUrl: string;
   model: string;
+  protocol?: "chat_completions" | "responses" | "anthropic_messages";
   apiKey?: string;
   clearApiKey?: boolean;
   allowRemote: boolean;
   timeoutMs: number;
   maxInputChars: number;
   maxSessionsPerScan: number;
+  maxWorkItemsPerScan: number;
+  maxProjectsPerScan: number;
   retryFailed: boolean;
 }
 
@@ -211,6 +270,18 @@ export interface ProviderConnectionTest {
   latencyMs: number;
   model: string;
   message: string;
+}
+
+export interface CcswitchDiscovery {
+  available: boolean;
+  providerId?: string;
+  providerName?: string;
+  appType?: "codex" | "claude";
+  baseUrl?: string;
+  model?: string;
+  protocol?: "chat_completions" | "responses" | "anthropic_messages";
+  mode?: LlmMode;
+  hasApiKey?: boolean;
 }
 
 export interface WorkItem {
@@ -241,6 +312,7 @@ export interface WorkItem {
     updatedAt: string;
   }) | null;
   feedback: WorkItemFeedback[];
+  agent: { provider: string; updatedAt: string; evidenceIds: string[] } | null;
   evidence: EvidenceRef[];
   progress: {
     objective: string;

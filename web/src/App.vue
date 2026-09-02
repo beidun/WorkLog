@@ -208,9 +208,18 @@ onMounted(loadOverview);
       <template v-else-if="overview">
         <section v-if="activeSection === 'overview' || activeSection === 'projects'" class="dashboard-page">
           <div class="page-intro">
-            <div><h1>{{ activeSection === 'projects' ? '所有项目' : '项目进展' }}</h1><p>从 AI 对话与工具证据中还原真实工作状态。</p></div>
+            <div><h1>{{ activeSection === 'projects' ? '所有项目' : '项目进展' }}</h1><p>从 AI 对话与工具证据中还原真实工作状态；“进行中”按最近 30 天有活动计算，历史事项仍保留在项目详情。</p></div>
             <time>更新于 {{ new Date(overview.generatedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}</time>
           </div>
+          <section v-if="activeSection === 'overview' && overview.agentCoverage" class="agent-coverage" aria-label="Agent 覆盖度">
+            <div class="agent-coverage-heading"><strong>Agent 覆盖度</strong><span>{{ overview.agentCoverage.provider || '尚未启用模型' }}</span></div>
+            <div class="agent-coverage-metrics">
+              <span><b>{{ overview.agentCoverage.projects.enhanced }}/{{ overview.agentCoverage.projects.total }}</b>项目已增强</span>
+              <span><b>{{ overview.agentCoverage.workItems.enhanced }}/{{ overview.agentCoverage.workItems.total }}</b>事项已增强</span>
+              <span><b>{{ overview.agentCoverage.sessions.enhanced }}/{{ overview.agentCoverage.sessions.total }}</b>会话已增强</span>
+            </div>
+            <small>未覆盖部分暂显示确定性统计；下一次扫描会按阻塞、待验证和最近活动优先补齐。</small>
+          </section>
           <MetricStrip v-if="activeSection === 'overview'" :metrics="overview.metrics" />
           <div class="dashboard-grid">
             <section class="project-region">

@@ -22,6 +22,8 @@ function llm(values: Partial<LlmConfig> = {}): LlmConfig {
     timeoutMs: 30_000,
     maxInputChars: 12_000,
     maxSessionsPerScan: 12,
+    maxWorkItemsPerScan: 20,
+    maxProjectsPerScan: 10,
     retryFailed: false,
     ...values,
   };
@@ -82,11 +84,15 @@ describe("LLM settings", () => {
         process.env.WORKLOG_DATA_DIR = root;
         process.env.WORKLOG_LLM_MODEL = "environment-model";
         process.env.WORKLOG_LLM_MAX_SESSIONS_PER_SCAN = "3";
+        process.env.WORKLOG_LLM_MAX_WORK_ITEMS_PER_SCAN = "7";
+        process.env.WORKLOG_LLM_MAX_PROJECTS_PER_SCAN = "4";
         const config = loadConfig();
         expect(config.llm.model).toBe("environment-model");
         expect(config.llm.maxSessionsPerScan).toBe(3);
+        expect(config.llm.maxWorkItemsPerScan).toBe(7);
+        expect(config.llm.maxProjectsPerScan).toBe(4);
         expect(config.llm.baseUrl).toBe("http://127.0.0.1:11434/v1");
-        expect(publicLlmSettings(config.llm, root).environmentOverrides).toEqual(["model", "maxSessionsPerScan"]);
+        expect(publicLlmSettings(config.llm, root).environmentOverrides).toEqual(["model", "maxSessionsPerScan", "maxWorkItemsPerScan", "maxProjectsPerScan"]);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

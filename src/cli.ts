@@ -2,11 +2,12 @@ import { loadConfig } from "./config";
 import { WorklogDatabase } from "./db";
 import { runFullScan } from "./runtime";
 import { getDailyReport, getOverview } from "./services";
-import { providerStatus } from "./llm/provider";
+import { AGENT_PROMPT_VERSION, agentSystemPrompt, providerStatus } from "./llm/provider";
 import { getWorkReport, type WorkReport, type WorkReportRange } from "./work-reports";
 import { loadDigestEvalSuite, runDigestEvalSuite } from "./digest-eval";
 import { defaultWorkItemEvalPath, exportWorkItemEvalSuite } from "./work-item-eval-export";
 import { scoreWorkItemEval } from "./work-item-eval-score";
+import { discoverCcswitchConfig } from "./ccswitch";
 
 const command = process.argv[2] ?? "help";
 const config = loadConfig();
@@ -35,7 +36,7 @@ if (command === "scan") {
     : getWorkReport(db, (value ?? "today") as WorkReportRange);
   console.log(`# ${report.label}工作总结\n\n${report.startDate}${report.endDate === report.startDate ? "" : ` 至 ${report.endDate}`}，涉及 ${report.projectCount} 个项目、${report.itemCount} 个事项。`);
   for (const project of report.projects) {
-    console.log(`\n## ${project.name}\n\n本时段：${project.todaySummary}\n当前状态：${project.currentSummary}`);
+    console.log(`\n## ${project.name}\n\n本时段：${project.todaySummary}\n当前状态：${project.currentSummary}${project.agent ? `\nAgent 判断：${project.agent.summary}（${project.agent.provider}）` : ""}`);
     for (const item of project.items) {
       console.log(`- ${item.title}: ${item.summary}`);
       for (const change of item.changeSummary) console.log(`  本时段变化：${change}`);
@@ -76,6 +77,28 @@ if (command === "scan") {
   const db = new WorklogDatabase(config.databasePath);
   console.log(JSON.stringify(scoreWorkItemEval(db), null, 2));
   db.close();
+} else if (command === "discover-llm") {
+  const discovered = discoverCcswitchConfig();
+  console.log(JSON.stringify(discovered ? {
+    available: true,
+    providerId: discovered.providerId,
+    providerName: discovered.providerName,
+    appType: discovered.appType,
+    baseUrl: discovered.baseUrl,
+    model: discovered.model,
+    protocol: discovered.protocol,
+    mode: discovered.mode,
+    hasApiKey: Boolean(discovered.apiKey),
+  } : { available: false }, null, 2));
+} else if (command === "prompts") {
+  console.log(JSON.stringify({
+    version: AGENT_PROMPT_VERSION,
+    roles: {
+      session: agentSystemPrompt("session"),
+      work_item: agentSystemPrompt("work_item"),
+      project: agentSystemPrompt("project"),
+    },
+  }, null, 2));
 } else {
-  console.log(`Agent Worklog\n\nCommands:\n  scan                         Scan Codex and Claude Code history\n  serve                        Start local API and Web UI\n  status                       Show all project progress\n  daily [YYYY-MM-DD]           Generate a summary for one date\n  report [today|yesterday|week] Generate a time-range work summary\n  eval [path]                  Run deterministic digest regression cases\n  eval-score                   Score reviewed work-item feedback\n  export-eval [path] [--all]   Export reviewed work-item evaluation cases`);
+  console.log(`Agent Worklog\n\nCommands:\n  scan                         Scan Codex and Claude Code history\n  serve                        Start local API and Web UI\n  status                       Show all project progress\n  daily [YYYY-MM-DD]           Generate a summary for one date\n  report [today|yesterday|week] Generate a time-range work summary\n  prompts                      Print the three active Agent system prompts\n  eval [path]                  Run deterministic digest regression cases\n  eval-score                   Score reviewed work-item feedback\n  discover-llm                 Show safe ccswitch model configuration\n  export-eval [path] [--all]   Export reviewed work-item evaluation cases`);
 }

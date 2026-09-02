@@ -6,6 +6,7 @@ import { WorklogDatabase } from "../src/db";
 import { getOverview, getProject, getProjectProgress } from "../src/services";
 import { rebuildSessionDigests } from "../src/session-digests";
 import { rebuildWorkItems } from "../src/work-items";
+import { saveProjectAgentDecision } from "../src/agent/project-agent-store";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -93,6 +94,11 @@ describe("project service", () => {
     expect(overview.projects[0].current_focus).toBe(progress?.summary);
     expect(overview.projects[0].progress.stage).toBe("blocked");
     expect(overview.metrics.needsAttention).toBe(2);
+    expect(overview.agentCoverage).toMatchObject({
+      sessions: { total: 0, enhanced: 0 },
+      workItems: { total: 0, enhanced: 0 },
+      projects: { total: 1, enhanced: 0 },
+    });
     expect(overview.attention[0]).toMatchObject({
       id: "item-blocked",
       project_id: "project-progress",
@@ -163,6 +169,84 @@ describe("project service", () => {
     const progress = getProjectProgress(db, projectId);
     expect(progress?.workstreams).toHaveLength(4);
     expect(progress?.workstreams.every((stream) => stream.items.length === 1)).toBe(true);
+    db.close();
+  });
+
+  test("excludes historical active rows from current progress counts", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-worklog-active-recency-"));
+    roots.push(root);
+    const db = new WorklogDatabase(join(root, "worklog.sqlite"));
+    const projectId = "project-active-recency";
+    const latest = "2026-08-20T08:00:00.000Z";
+    db.db.query("INSERT INTO projects(id,name,root_path,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run(projectId, "active-recency-project", root, latest, latest, latest);
+    const insert = db.db.query(`
+      INSERT INTO work_items(id,project_id,title,summary,status,confidence,first_activity_at,last_activity_at,next_step,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    `);
+    insert.run("recent", projectId, "近期核查", "正在核查。", "in_progress", 0.8, latest, latest, "", latest, latest);
+    insert.run("stale", projectId, "历史核查", "历史事项。", "in_progress", 0.8, "2026-06-01T08:00:00.000Z", "2026-06-01T08:00:00.000Z", "", latest, latest);
+
+    const progress = getProjectProgress(db, projectId);
+    expect(progress?.counts.active).toBe(1);
+    expect(progress?.active.map((item) => item.id)).toEqual(["recent"]);
+    expect((getOverview(db) as any).projects[0].active_count).toBe(1);
+    db.close();
+  });
+
+  test("uses the latest database activity as the recency anchor across projects", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-worklog-global-recency-"));
+    roots.push(root);
+    const db = new WorklogDatabase(join(root, "worklog.sqlite"));
+    const insertProject = db.db.query("INSERT INTO projects(id,name,root_path,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?)");
+    insertProject.run("old-project", "沉寂项目", root, "2026-06-01T08:00:00.000Z", "2026-06-01T08:00:00.000Z", "2026-06-01T08:00:00.000Z");
+    insertProject.run("new-project", "近期项目", root, "2026-08-20T08:00:00.000Z", "2026-08-20T08:00:00.000Z", "2026-08-20T08:00:00.000Z");
+    const insert = db.db.query("INSERT INTO work_items(id,project_id,title,summary,status,confidence,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)");
+    insert.run("old-active", "old-project", "历史推进", "历史事项", "in_progress", 0.8, "2026-06-01T08:00:00.000Z", "2026-06-01T08:00:00.000Z", "2026-06-01T08:00:00.000Z");
+    insert.run("new-done", "new-project", "近期完成", "近期事项", "verified", 0.9, "2026-08-20T08:00:00.000Z", "2026-08-20T08:00:00.000Z", "2026-08-20T08:00:00.000Z");
+    expect(getProjectProgress(db, "old-project")?.counts.active).toBe(0);
+    expect(getProjectProgress(db, "old-project")?.stage).toBe("completed");
+    db.close();
+  });
+
+  test("does not count stale attention items in the current overview", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-worklog-attention-recency-"));
+    roots.push(root);
+    const projectId = "project-attention-recency";
+    const latest = "2026-08-20T08:00:00.000Z";
+    const db = new WorklogDatabase(join(root, "worklog.sqlite"));
+    db.db.query("INSERT INTO projects(id,name,root_path,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run(projectId, "attention-recency-project", root, latest, latest, latest);
+    const insert = db.db.query("INSERT INTO work_items(id,project_id,title,summary,status,confidence,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)");
+    insert.run("blocked-old", projectId, "历史阻塞", "仍需外部处理。", "blocked", 0.8, "2026-06-01T08:00:00.000Z", latest, latest);
+    insert.run("partial-old", projectId, "历史部分完成", "历史事项。", "partially_done", 0.8, "2026-06-01T08:00:00.000Z", latest, latest);
+    insert.run("partial-recent", projectId, "近期部分完成", "近期事项。", "partially_done", 0.8, latest, latest, latest);
+    const overview = getOverview(db) as any;
+    expect(overview.metrics.needsAttention).toBe(2);
+    expect(overview.attention.map((item: any) => item.id)).toEqual(["blocked-old", "partial-recent"]);
+    db.close();
+  });
+
+  test("surfaces the persisted project-agent narrative with its evidence", () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-worklog-project-agent-view-"));
+    roots.push(root);
+    const db = new WorklogDatabase(join(root, "worklog.sqlite"));
+    const projectId = "project-agent-view";
+    const now = "2026-08-20T08:00:00.000Z";
+    db.db.query("INSERT INTO projects(id,name,root_path,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run(projectId, "agent-view-project", root, now, now, now);
+    db.db.query("INSERT INTO work_items(id,project_id,title,summary,status,confidence,last_activity_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run("item-1", projectId, "核查数据", "数据正常。", "verified", 0.9, now, now, now);
+    const sessionId = db.upsertSession({ source: "codex", externalId: "agent-view-session", cwd: root, startedAt: now, endedAt: now, isSubagent: false, sourceFile: join(root, "s.jsonl") });
+    db.db.query("UPDATE sessions SET project_id=? WHERE id=?").run(projectId, sessionId);
+    db.upsertEvent({ id: "agent-view-event", source: "codex", sessionExternalId: "agent-view-session", type: "assistant_message", role: "assistant", content: "数据核对完成", timestamp: now, sourceFile: join(root, "s.jsonl"), sourceLine: 1, rawHash: "agent-view-event-hash" });
+    db.db.query("INSERT INTO work_item_sessions(work_item_id,session_id) VALUES (?,?)").run("item-1", sessionId);
+    db.db.query("INSERT INTO work_item_evidence(work_item_id,event_id,evidence_kind) VALUES (?,?,?)").run("item-1", "agent-view-event", "finding");
+    saveProjectAgentDecision(db, { projectId, inputHash: "h", headline: "Agent：数据核查已完成", summary: "Agent 已根据证据确认数据链路正常。", completed: ["数据核查"], validations: ["链路正常"], blockers: [], remaining: [], stage: "completed", evidenceIds: ["agent-view-event"], nextSteps: [], provider: "fake:model", confidence: 0.86 });
+    const progress = getProjectProgress(db, projectId, true);
+    expect(progress?.headline).toBe("Agent：数据核查已完成");
+    expect(progress?.agent?.evidenceIds).toEqual(["agent-view-event"]);
+    expect(progress?.evidence.some((item: any) => item.id === "agent-view-event" && item.evidence_kind === "agent")).toBe(true);
     db.close();
   });
 

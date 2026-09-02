@@ -83,6 +83,7 @@ function periodLabel(report: WorkReport): string {
             <div><span>PROJECT</span><h2>{{ project.name }}</h2><p><b>本时段：</b>{{ project.todaySummary }} <em>当前：{{ project.currentSummary }}</em></p></div>
             <div class="project-report-counts"><span v-if="project.counts.active">{{ project.counts.active }} 推进</span><span v-if="project.counts.completed">{{ project.counts.completed }} 已验证</span><span v-if="project.counts.unverified">{{ project.counts.unverified }} 待验证</span><span v-if="project.counts.blocked" class="danger">{{ project.counts.blocked }} 阻塞</span></div>
           </summary>
+          <div v-if="project.agent" class="report-agent-summary"><strong>Agent 判断</strong><span>{{ project.agent.summary }}</span><small>{{ project.agent.provider }} · {{ new Date(project.agent.updatedAt).toLocaleString('zh-CN') }}</small><div v-if="project.agent.evidence.length" class="report-agent-citations"><button v-for="(citation, index) in project.agent.evidence" :key="citation.id" @click="emit('evidence', citation)">证据 {{ index + 1 }} · L{{ citation.source_line }}</button></div></div>
 
           <div class="report-item-list">
             <article v-for="item in project.items" :key="item.id" class="report-item">

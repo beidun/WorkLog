@@ -222,6 +222,18 @@ describe("session digest", () => {
     db.close();
   });
 
+  test("closes a tool-backed audit when the final verdict has no completion keyword", async () => {
+    const { db, add } = fixture();
+    add("user_message", { role: "user", content: "检查 sector 上周数据" });
+    add("tool_call", { toolName: "exec_command", toolCallId: "sector-check", command: "ssh server check-sector" });
+    add("tool_result", { toolCallId: "sector-check", content: "rows and null checks" });
+    add("assistant_message", { role: "assistant", content: "上周 sector_daily_flow 全部完整，无缺口，写入时间符合预期，主力净流入在正常范围内。" });
+
+    await rebuildSessionDigests(db);
+    expect(db.db.query("SELECT status, next_step FROM session_digests").get()).toEqual({ status: "verified", next_step: "" });
+    db.close();
+  });
+
   test("keeps facts on the latest answer turn and ignores negated next steps", async () => {
     const { db, add } = fixture();
     add("user_message", { role: "user", content: "检查旧接口" });
@@ -507,10 +519,57 @@ describe("session digest", () => {
       status: "done_unverified", provider: "fake:model",
     });
     expect(db.db.query("SELECT COUNT(*) AS count FROM session_digest_evidence WHERE event_id=? AND digest_section='progress'").get(evidenceId)).toEqual({ count: 1 });
+    expect(db.db.query("SELECT status,provider,attempts FROM agent_runs").get()).toEqual({ status: "completed", provider: "fake:model", attempts: 1 });
+    expect(db.db.query("SELECT COUNT(*) AS count FROM agent_run_steps").get()).toEqual({ count: 7 });
     expect(await rebuildSessionDigests(db, { provider, maxModelSessions: 1 })).toEqual({
       rebuilt: 0, skipped: 1, enhanced: 0, fallback: 0, deferred: 0,
     });
     expect(calls).toBe(1);
+    db.close();
+  });
+
+  test("allows the Agent to verify rule-derived progress with successful evidence", async () => {
+    const { db, add } = fixture();
+    add("user_message", { role: "user", content: "修复扫描器并运行测试" });
+    add("tool_call", { toolName: "exec_command", toolCallId: "verify-test", command: "bun test" });
+    const resultId = add("tool_result", { toolCallId: "verify-test", content: "12 pass" });
+    let received: SessionDigestResult | undefined;
+    const provider: WorklogModelProvider = {
+      name: "fake:verifier", cacheKey: "fake-verifier-v1",
+      async digestSession(input): Promise<SessionDigestResult> {
+        received = {
+          headline: "扫描器修复已验证", progressSummary: "修复已完成，测试全部通过。",
+          completed: ["修复扫描器"], validations: ["bun test：12 pass"], blockers: [], remaining: [],
+          status: "verified", nextStep: "", evidenceIds: [resultId],
+        };
+        expect(input.events.some((event) => event.id === resultId)).toBeTrue();
+        return received;
+      },
+    };
+
+    await rebuildSessionDigests(db, { provider });
+    const digest = db.db.query("SELECT status, validations_json FROM session_digests").get() as any;
+    expect(digest.status).toBe("verified");
+    expect(JSON.parse(digest.validations_json)).toContain("bun test：12 pass");
+    db.close();
+  });
+
+  test("does not verify from a generic assistant sentence without completion evidence", async () => {
+    const { db, add } = fixture();
+    add("user_message", { role: "user", content: "检查扫描器" });
+    const proseId = add("assistant_message", { role: "assistant", content: "正在检查扫描器，请稍候。" });
+    const provider: WorklogModelProvider = {
+      name: "fake:overconfident", cacheKey: "fake-overconfident-v1",
+      async digestSession(): Promise<SessionDigestResult> {
+        return {
+          headline: "扫描器已完成", progressSummary: "检查完成。", completed: [], validations: [], blockers: [],
+          remaining: [], status: "verified", nextStep: "", evidenceIds: [proseId],
+        };
+      },
+    };
+
+    await rebuildSessionDigests(db, { provider });
+    expect((db.db.query("SELECT status FROM session_digests").get() as any).status).not.toBe("verified");
     db.close();
   });
 
@@ -528,6 +587,7 @@ describe("session digest", () => {
       rebuilt: 1, skipped: 0, enhanced: 0, fallback: 1, deferred: 0,
     });
     expect((db.db.query("SELECT provider FROM session_digests").get() as any).provider).toBe("fallback:fake-failing-v1");
+    expect(db.db.query("SELECT status,provider FROM agent_runs").get()).toEqual({ status: "failed", provider: "fake:failing" });
     expect(await rebuildSessionDigests(db, { provider })).toEqual({
       rebuilt: 0, skipped: 1, enhanced: 0, fallback: 0, deferred: 0,
     });

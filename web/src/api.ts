@@ -1,4 +1,4 @@
-import type { LlmSettings, LlmSettingsPayload, Overview, ProjectCorrectionPayload, ProjectDetailResponse, ProviderConnectionTest, ReviewQueueResponse, WorkItemCorrectionPayload, WorkItemFeedback, WorkItemFeedbackType, WorkItemEvalScore, WorkItemEvalSuite, WorkReport, WorkReportRange } from "./types";
+import type { AgentRun, AgentRunDetails, CcswitchDiscovery, LlmSettings, LlmSettingsPayload, Overview, ProjectCorrectionPayload, ProjectDetailResponse, ProviderConnectionTest, ReviewQueueResponse, WorkItemCorrectionPayload, WorkItemFeedback, WorkItemFeedbackType, WorkItemEvalScore, WorkItemEvalSuite, WorkReport, WorkReportRange } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
@@ -40,7 +40,11 @@ export const api = {
   workReport: (range: WorkReportRange) => request<WorkReport>(`/api/reports/work?range=${range}`),
   scan: () => request<{ status: string }>("/api/scan", { method: "POST" }),
   scanStatus: () => request<Record<string, any>>("/api/scan/status"),
+  agentRuns: (limit = 20) => request<{ runs: AgentRun[] }>(`/api/agent/runs?limit=${limit}`),
+  agentRun: (id: string) => request<AgentRunDetails>(`/api/agent/runs/${encodeURIComponent(id)}`),
   settings: () => request<LlmSettings>("/api/settings/llm"),
+  discoverCcswitch: () => request<CcswitchDiscovery>("/api/settings/llm/ccswitch"),
+  importCcswitch: (providerId?: string) => request<LlmSettings>(`/api/settings/llm/ccswitch${providerId ? `?providerId=${encodeURIComponent(providerId)}` : ""}`, { method: "PUT" }),
   saveSettings: (payload: LlmSettingsPayload) => request<LlmSettings>("/api/settings/llm", {
     method: "PUT",
     headers: jsonHeaders,

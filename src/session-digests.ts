@@ -1,12 +1,18 @@
 import type { WorklogDatabase } from "./db";
 import type { SessionDigestInput, SessionDigestResult, WorklogModelProvider } from "./llm/provider";
+import { WorklogAgent } from "./agent/worklog-agent";
+import { persistAgentFailure, persistAgentTrace } from "./agent/trace-store";
 import type { SessionDigest, SessionFact, SessionFactKind, WorkStatus } from "./types";
 import { normalizeWhitespace, safeJson, sha256 } from "./utils";
 
-const DIGEST_VERSION = "deterministic-v19";
+const DIGEST_VERSION = "deterministic-v20";
 const WRITE_TOOL = /^(?:Edit|Write|MultiEdit|apply_patch)$/i;
 const VALIDATION_COMMAND = /(?:^|\s)(?:cargo\s+(?:test|check|clippy|build)|bun\s+(?:test|run\s+(?:build|typecheck))|npm\s+(?:test|run\s+(?:build|test|typecheck))|pnpm\s+(?:test|run\s+(?:build|test|typecheck))|yarn\s+(?:test|build|typecheck)|pytest|python\s+-m\s+pytest|go\s+test|mvn\s+test|gradle\s+test|tsc\s+--noEmit|vue-tsc|vite\s+build)(?:\s|$)/i;
 const COMPLETE_PATTERN = /(?:已完成|已经完成|完成了|已实现|已经实现|已修复|已经修复|已通过|测试.*通过|构建.*成功|验证.*通过|结论[:：]|结论如下|已检查|已梳理|查清楚|已确认|确认如下|整理完毕|分析完成|审查完成|核对完成|^(?:done|completed|fixed|implemented)\b)/i;
+// Read-only investigations often end with a concrete verdict instead of the
+// words “已完成”. These phrases close the work item when no pending action is
+// stated, avoiding a large pile of stale in_progress items.
+const RESULT_COMPLETION_PATTERN = /(?:全部完整|无缺口|符合预期|正常范围|未发现(?:问题|异常|缺失|错误)|没有(?:问题|缺失|异常|错误)|无需(?:额外|继续|再)(?:处理|配置|修改|检查|验证)?|不需要(?:额外|继续|再)(?:处理|配置|修改|检查|验证)?)/i;
 const BLOCKER_PATTERN = /(?:缺少|缺乏|无法继续|不能继续|等待.{0,12}(?:用户|外部).{0,12}(?:授权|确认|输入)|需要用户.{0,20}(?:授权|确认|提供)|permission denied|access denied|\bblocked\b|(?:当前|仍然|仍|已经|已|处于|受到|受).{0,12}(?:阻塞|卡住)|(?:阻塞|卡住)(?:了|中|因为|原因|[:：]))/i;
 const BLOCKER_NEGATION = /(?:无阻塞|没有阻塞|未受阻|不再阻塞|没有卡住|没卡住|未卡住|不是.{0,6}阻塞|并非.{0,6}阻塞|无需用户|无需等待)/i;
 const REMAINING_PATTERN = /(?:尚未|还未|仍需|有待|待验证|待确认|未完成|下一步|接下来|剩余)/i;
@@ -439,14 +445,20 @@ function inferDigest(sessionId: string, inputHash: string, events: EventRow[]): 
     && currentTurnToolCalls.length === 0);
   const hasConclusiveAnswer = /^(?:是的|不是|没错|对[，,]|你说得对|结论|查清楚|确认|已)/.test(finalText.trim()) && finalText.trim().length >= 16;
   const hasResolvedAnswer = RESOLUTION_FACT_PATTERN.test(factText(finalText));
-  const hasCompletion = COMPLETE_PATTERN.test(finalText) || hasConclusiveAnswer || hasResolvedAnswer || finalAnswerDelivered || readOnlyAnswerDelivered;
-  const latestScopeAfterValidation = lastUserLine > Math.max(lastWriteLine, lastValidationLine) && (finalAssistant?.source_line ?? 0) > lastUserLine && !hasCompletion;
+  const hasCompletion = COMPLETE_PATTERN.test(finalText) || RESULT_COMPLETION_PATTERN.test(finalText)
+    || hasConclusiveAnswer || hasResolvedAnswer || finalAnswerDelivered || readOnlyAnswerDelivered;
+  // A tool-backed read-only turn with a substantive final answer and no
+  // pending work is complete even when the source adapter did not emit an
+  // explicit task_completed marker (common in older Claude/Codex logs).
+  const implicitReadOnlyCompletion = Boolean(finalAssistant && writes.length === 0 && successfulResults.length > 0
+    && remaining.length === 0 && blockerSentences.length === 0 && finalText.trim().length >= 20);
+  const effectiveCompletion = hasCompletion || implicitReadOnlyCompletion;
+  const latestScopeAfterValidation = lastUserLine > Math.max(lastWriteLine, lastValidationLine) && (finalAssistant?.source_line ?? 0) > lastUserLine && !effectiveCompletion;
   const finalConclusion = completionSentence && completionSentence.length >= 12
     ? completionSentence
     : (hasConclusiveAnswer ? finalSentences.find((sentence) => sentence.length >= 12) : undefined);
   const validationAfterLastWrite = successfulValidations.length > 0 && lastValidationLine >= lastWriteLine;
-  const unresolvedFailure = lastResult?.is_error === 1 && !hasCompletion;
-
+  const unresolvedFailure = lastResult?.is_error === 1 && !effectiveCompletion;
   let status: WorkStatus;
   let confidence: number;
   if (aborted) {
@@ -461,7 +473,7 @@ function inferDigest(sessionId: string, inputHash: string, events: EventRow[]): 
     status = "verified"; confidence = 0.9;
   } else if (validationAfterLastWrite && (writes.length > 0 || hasCompletion)) {
     status = "verified"; confidence = 0.92;
-  } else if (writes.length === 0 && hasCompletion && successfulResults.length > 0) {
+  } else if (writes.length === 0 && effectiveCompletion && successfulResults.length > 0) {
     status = "verified"; confidence = 0.84;
   } else if (writes.length > 0 && hasCompletion) {
     status = "done_unverified"; confidence = 0.84;
@@ -543,8 +555,9 @@ function eventText(event: EventRow): string {
   return event.content ?? event.command ?? event.tool_name ?? event.event_type;
 }
 
-function modelInput(projectName: string, baseline: SessionDigest, events: EventRow[]): SessionDigestInput {
+function modelInput(sessionId: string, projectName: string, baseline: SessionDigest, events: EventRow[]): SessionDigestInput {
   return {
+    sessionId,
     projectName,
     objective: baseline.objective,
     baseline: {
@@ -560,13 +573,13 @@ function modelInput(projectName: string, baseline: SessionDigest, events: EventR
       openTurn: openTurn(events),
     },
     events: events.filter((event) => ["user_message", "assistant_message", "tool_call", "tool_result", "task_completed", "task_aborted"].includes(event.event_type))
-      .map((event) => ({ id: event.id, kind: event.event_type, text: eventText(event), timestamp: event.timestamp ?? undefined })),
+      .map((event) => ({ id: event.id, kind: event.event_type, text: eventText(event), timestamp: event.timestamp ?? undefined, isError: event.is_error === 1 })),
   };
 }
 
 function supportedModelStatus(result: SessionDigestResult, baseline: SessionDigest, events: EventRow[]): WorkStatus {
   if (openTurn(events)) return ["in_progress", "partially_done"].includes(result.status) ? result.status : baseline.status;
-  if (result.status === "verified" && baseline.status !== "verified") return baseline.status;
+  if (result.status === "verified" && baseline.status !== "verified" && !hasVerifiedEvidence(result, events)) return baseline.status;
   if (result.status === "abandoned" && baseline.status !== "abandoned") return baseline.status;
   if (result.status === "blocked") {
     const selected = new Set(result.evidenceIds);
@@ -576,14 +589,36 @@ function supportedModelStatus(result: SessionDigestResult, baseline: SessionDige
   }
   const transitions: Record<WorkStatus, WorkStatus[]> = {
     planned: ["planned", "in_progress"],
-    in_progress: ["in_progress", "partially_done", "done_unverified", "blocked"],
-    partially_done: ["in_progress", "partially_done", "done_unverified", "blocked"],
-    done_unverified: ["in_progress", "partially_done", "done_unverified", "blocked"],
+    in_progress: ["in_progress", "partially_done", "done_unverified", "verified", "blocked"],
+    partially_done: ["in_progress", "partially_done", "done_unverified", "verified", "blocked"],
+    done_unverified: ["in_progress", "partially_done", "done_unverified", "verified", "blocked"],
     verified: ["verified", "done_unverified"],
-    blocked: ["blocked", "in_progress", "partially_done"],
+    blocked: ["blocked", "in_progress", "partially_done", "verified"],
     abandoned: ["abandoned"],
   };
   return transitions[baseline.status].includes(result.status) ? result.status : baseline.status;
+}
+
+/**
+ * A model is allowed to close a rule-derived item only when it cites a
+ * completion-bearing event. This keeps the Agent authoritative for status
+ * while preventing a generic prose response from upgrading stale work.
+ */
+function hasVerifiedEvidence(result: SessionDigestResult, events: EventRow[]): boolean {
+  const selected = new Set(result.evidenceIds);
+  return events.some((event) => {
+    if (!selected.has(event.id)) return false;
+    if (event.event_type === "task_completed") return true;
+    if (event.event_type === "tool_result") {
+      return event.is_error === 0 && !/(?:\b(?:error|failed|failure|timeout)\b|失败|错误|超时|报错)/i.test(eventText(event));
+    }
+    if (event.event_type === "assistant_message") {
+      return COMPLETE_PATTERN.test(eventText(event))
+        || RESULT_COMPLETION_PATTERN.test(eventText(event))
+        || VALIDATION_FACT_PATTERN.test(eventText(event));
+    }
+    return false;
+  });
 }
 
 function applyModelResult(baseline: SessionDigest, result: SessionDigestResult, events: EventRow[], provider: WorklogModelProvider): SessionDigest {
@@ -594,7 +629,7 @@ function applyModelResult(baseline: SessionDigest, result: SessionDigestResult, 
     headline: result.headline,
     progressSummary: result.progressSummary,
     completed: result.completed,
-    validations: baseline.validations.length > 0 ? result.validations : [],
+    validations: [...new Set([...baseline.validations, ...result.validations])].slice(0, 6),
     blockers: status === "blocked" ? result.blockers : [],
     remaining: ["verified", "abandoned"].includes(status) ? [] : result.remaining,
     status,
@@ -637,6 +672,11 @@ export interface DigestRebuildOptions {
   provider?: WorklogModelProvider | null;
   maxModelSessions?: number;
   retryFailed?: boolean;
+  /** Maximum attempts per Agent run. Kept at one by default for deterministic callers. */
+  agentMaxAttempts?: number;
+  /** Delay between transient Agent retries. */
+  agentRetryDelayMs?: number;
+  onAgentTrace?: (step: import("./agent/worklog-agent").AgentTraceStep) => void;
 }
 
 export interface DigestRebuildStats {
@@ -653,7 +693,15 @@ export async function rebuildSessionDigests(database: WorklogDatabase, options: 
     SELECT s.id, COALESCE(p.name, 'Unknown project') AS project_name FROM sessions s
     LEFT JOIN projects p ON p.id=s.project_id
     WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id=s.id AND e.event_type='user_message' AND e.content IS NOT NULL AND trim(e.content)<>'')
-    ORDER BY COALESCE(s.ended_at,s.started_at) DESC
+    -- Spend the bounded model budget on uncertain work first. A pure
+    -- newest-first order wastes all 20 slots on already verified audits and
+    -- leaves the genuinely unfinished sessions on deterministic fallback.
+    ORDER BY CASE WHEN EXISTS (
+      SELECT 1 FROM session_digests previous
+      WHERE previous.session_id=s.id
+        AND previous.status IN ('in_progress','partially_done','blocked','done_unverified')
+    ) THEN 0 ELSE 1 END,
+    COALESCE(s.ended_at,s.started_at) DESC
   `).all() as Array<{ id: string; project_name: string }>;
   let rebuilt = 0;
   let skipped = 0;
@@ -688,11 +736,24 @@ export async function rebuildSessionDigests(database: WorklogDatabase, options: 
     const digestEvents = objectiveEvent ? currentWorkSegment(events, objectiveEvent) : events;
     if (provider && modelAttempts < maximum) {
       modelAttempts += 1;
+      let runId: string | undefined;
+      let attempts = 0;
       try {
-        const result = await provider.digestSession(modelInput(session.project_name, digest, digestEvents));
-        digest = applyModelResult(digest, result, digestEvents, provider);
+        const result = await new WorklogAgent(provider, {
+          maxAttempts: options.agentMaxAttempts,
+          retryDelayMs: options.agentRetryDelayMs,
+          onTrace: (step) => {
+            runId = step.runId;
+            attempts = Math.max(attempts, step.attempt);
+            persistAgentTrace(database, step);
+            options.onAgentTrace?.(step);
+          },
+        })
+          .run(modelInput(session.id, session.project_name, digest, digestEvents));
+        digest = applyModelResult(digest, result.result, digestEvents, provider);
         enhanced += 1;
-      } catch {
+      } catch (error) {
+        if (runId) persistAgentFailure(database, runId, session.id, error, provider.name, attempts);
         digest.provider = fallbackMarker;
         fallback += 1;
       }

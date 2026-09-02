@@ -4,7 +4,7 @@ import { loadConfig } from "./config";
 import { WorklogDatabase } from "./db";
 import { runFullScan, scanState } from "./runtime";
 import { getDailyReport, getEvidence, getOverview, getProject } from "./services";
-import { OpenAICompatibleProvider, providerStatus } from "./llm/provider";
+import { AGENT_PROMPT_VERSION, agentSystemPrompt, OpenAICompatibleProvider, providerStatus } from "./llm/provider";
 import { parseLlmSettingsUpdate, publicLlmSettings, readStoredSettings, writeStoredLlmSettings } from "./settings";
 import { getWorkReport, type WorkReportRange } from "./work-reports";
 import { clearWorkItemCorrection, parseWorkItemCorrection, saveWorkItemCorrection } from "./work-item-corrections";
@@ -13,6 +13,9 @@ import { clearProjectCorrection, parseProjectCorrection, saveProjectCorrection }
 import { clearWorkItemFeedback, getReviewQueue, parseWorkItemFeedback, saveWorkItemFeedback } from "./work-item-feedback";
 import { buildWorkItemEvalSuite } from "./work-item-eval-export";
 import { scoreWorkItemEval } from "./work-item-eval-score";
+import { discoverCcswitchConfig } from "./ccswitch";
+import { agentRunDetails, latestAgentRuns } from "./agent/trace-store";
+import { reapplyCachedWorkItemAgentDecisions } from "./agent/work-item-agent";
 
 const config = loadConfig();
 const database = new WorklogDatabase(config.databasePath);
@@ -52,19 +55,89 @@ async function requestJson(request: Request): Promise<unknown> {
 async function api(request: Request, url: URL): Promise<Response | null> {
   if (url.pathname === "/api/overview" && request.method === "GET") return json({ ...getOverview(database), llmProvider: scanState.llm });
   if (url.pathname === "/api/scan/status" && request.method === "GET") return json(scanState);
+  const agentRunMatch = url.pathname.match(/^\/api\/agent\/runs\/([^/]+)$/);
+  if (agentRunMatch && request.method === "GET") {
+    const details = agentRunDetails(database, decodeURIComponent(agentRunMatch[1]));
+    return details ? json(details) : json({ error: "Agent run not found" }, 404);
+  }
+  if (url.pathname === "/api/agent/runs" && request.method === "GET") {
+    return json({ runs: latestAgentRuns(database, Number(url.searchParams.get("limit") ?? 20)) });
+  }
+  if (url.pathname === "/api/agent/prompts" && request.method === "GET") {
+    return json({
+      version: AGENT_PROMPT_VERSION,
+      roles: {
+        session: agentSystemPrompt("session"),
+        work_item: agentSystemPrompt("work_item"),
+        project: agentSystemPrompt("project"),
+      },
+    });
+  }
   if (url.pathname === "/api/settings/llm" && request.method === "GET") {
     return json(publicLlmSettings(config.llm, config.dataDir));
+  }
+  if (url.pathname === "/api/settings/llm/ccswitch" && request.method === "GET") {
+    const requestedProviderId = url.searchParams.get("providerId") ?? undefined;
+    const discovered = discoverCcswitchConfig(undefined, undefined, requestedProviderId);
+    return json(discovered ? {
+      available: true,
+      providerId: discovered.providerId,
+      providerName: discovered.providerName,
+      appType: discovered.appType,
+      baseUrl: discovered.baseUrl,
+      model: discovered.model,
+      protocol: discovered.protocol,
+      mode: discovered.mode,
+      hasApiKey: Boolean(discovered.apiKey),
+    } : { available: false });
+  }
+  if (url.pathname === "/api/settings/llm/ccswitch" && request.method === "PUT") {
+    if (!isLocalMutation(request)) return json({ error: "Local origin required" }, 403);
+    const requestedProviderId = url.searchParams.get("providerId") ?? undefined;
+    const discovered = discoverCcswitchConfig(undefined, undefined, requestedProviderId);
+    if (!discovered) return json({ error: "没有找到可用的 ccswitch 当前 Provider。" }, 404);
+    try {
+      const importedConfig = {
+        mode: discovered.mode,
+        baseUrl: discovered.baseUrl,
+        model: discovered.model,
+        protocol: discovered.protocol,
+        apiKey: discovered.apiKey,
+        allowRemote: discovered.mode === "remote",
+        timeoutMs: config.llm.timeoutMs,
+        maxInputChars: config.llm.maxInputChars,
+        maxSessionsPerScan: config.llm.maxSessionsPerScan,
+        maxWorkItemsPerScan: config.llm.maxWorkItemsPerScan,
+        maxProjectsPerScan: config.llm.maxProjectsPerScan,
+        retryFailed: config.llm.retryFailed,
+      };
+      new OpenAICompatibleProvider(importedConfig);
+      writeStoredLlmSettings(config.dataDir, importedConfig);
+      config.llm = loadConfig().llm;
+      scanState.llm = providerStatus(config.llm);
+      if (config.llm.mode === "off") {
+        database.db.run("DELETE FROM work_item_agent_decisions");
+        database.db.run("DELETE FROM agent_failures WHERE scope='work_item'");
+      }
+      return json(publicLlmSettings(config.llm, config.dataDir));
+    } catch (error) {
+      return json({ error: errorMessage(error) }, 400);
+    }
   }
   if (url.pathname === "/api/settings/llm" && request.method === "PUT") {
     if (!isLocalMutation(request)) return json({ error: "Local origin required" }, 403);
     try {
       const body = await requestJson(request);
       const storedApiKey = readStoredSettings(config.dataDir).llm?.apiKey;
-      const nextStoredConfig = parseLlmSettingsUpdate(body, storedApiKey);
+      const nextStoredConfig = parseLlmSettingsUpdate(body, storedApiKey, config.llm.protocol);
       if (nextStoredConfig.mode !== "off") new OpenAICompatibleProvider(nextStoredConfig);
       writeStoredLlmSettings(config.dataDir, nextStoredConfig);
       config.llm = loadConfig().llm;
       scanState.llm = providerStatus(config.llm);
+      if (config.llm.mode === "off") {
+        database.db.run("DELETE FROM work_item_agent_decisions");
+        database.db.run("DELETE FROM agent_failures WHERE scope='work_item'");
+      }
       return json(publicLlmSettings(config.llm, config.dataDir));
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);
@@ -74,7 +147,7 @@ async function api(request: Request, url: URL): Promise<Response | null> {
     if (!isLocalMutation(request)) return json({ error: "Local origin required" }, 403);
     try {
       const body = await requestJson(request);
-      const testConfig = parseLlmSettingsUpdate(body, config.llm.apiKey);
+      const testConfig = parseLlmSettingsUpdate(body, config.llm.apiKey, config.llm.protocol);
       if (testConfig.mode === "off") return json({ error: "请先选择本机模型或远程模型。" }, 400);
       const provider = new OpenAICompatibleProvider(testConfig);
       return json(await provider.testConnection());
@@ -117,6 +190,7 @@ async function api(request: Request, url: URL): Promise<Response | null> {
     try {
       const removed = clearWorkItemCorrection(database, correctionMatch[1]);
       rebuildWorkItems(database);
+      if (scanState.llm?.name) reapplyCachedWorkItemAgentDecisions(database, scanState.llm.name);
       return json({ removed });
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);
@@ -156,6 +230,7 @@ async function api(request: Request, url: URL): Promise<Response | null> {
     try {
       const removed = clearProjectCorrection(database, projectCorrectionMatch[1]);
       rebuildWorkItems(database);
+      if (scanState.llm?.name) reapplyCachedWorkItemAgentDecisions(database, scanState.llm.name);
       return json({ removed });
     } catch (error) {
       return json({ error: errorMessage(error) }, 400);

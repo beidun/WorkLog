@@ -156,9 +156,21 @@ const factLabels = { finding: "结论", change: "变更", validation: "验证", 
         <section v-if="detail.progress" class="project-progress-section">
           <div class="project-progress-heading">
             <div><span class="progress-kicker">项目级判断</span><h3>{{ detail.progress.headline }}</h3></div>
-            <span :class="['project-stage', detail.progress.stage]">{{ detail.progress.stageLabel }}</span>
+            <div class="project-stage-stack">
+              <span :class="['project-stage', detail.progress.stage]">统计：{{ detail.progress.stageLabel }}</span>
+              <span v-if="detail.progress.agentStageLabel" :class="['project-stage', detail.progress.agentStage]">Agent：{{ detail.progress.agentStageLabel }}</span>
+            </div>
           </div>
           <p class="project-progress-summary">{{ detail.progress.summary }}</p>
+          <p v-if="detail.progress.agent" class="agent-provenance">
+            Agent 判断 · {{ detail.progress.agent.provider }} · {{ new Date(detail.progress.agent.updatedAt).toLocaleString('zh-CN') }}
+          </p>
+          <div v-if="detail.progress.agent && (detail.progress.agent.completed.length || detail.progress.agent.validations.length || detail.progress.agent.blockers.length || detail.progress.agent.remaining.length)" class="agent-facts">
+            <span v-for="fact in detail.progress.agent.completed.slice(0, 2)" :key="`completed:${fact}`"><b>Agent 完成</b>{{ fact }}</span>
+            <span v-for="fact in detail.progress.agent.validations.slice(0, 2)" :key="`validation:${fact}`"><b>Agent 验证</b>{{ fact }}</span>
+            <span v-for="fact in detail.progress.agent.blockers.slice(0, 2)" :key="`blocker:${fact}`" class="danger"><b>Agent 阻塞</b>{{ fact }}</span>
+            <span v-for="fact in detail.progress.agent.remaining.slice(0, 2)" :key="`remaining:${fact}`" class="warning"><b>Agent 待处理</b>{{ fact }}</span>
+          </div>
           <div class="project-progress-metrics">
             <span><strong>{{ detail.progress.counts.completed }}</strong>已完成</span>
             <span><strong>{{ detail.progress.counts.active }}</strong>推进中</span>
@@ -243,6 +255,7 @@ const factLabels = { finding: "结论", change: "变更", validation: "验证", 
               <span :class="['status-mark', item.status]"></span><strong>{{ item.title }}</strong>
               <span class="work-item-actions"><span class="work-status">{{ detail.statusLabels[item.status] }}</span><button class="edit-work-item" :aria-label="`编辑事项：${item.title}`" title="编辑人工纠正" @click="beginCorrection(item)"><AppIcon name="edit" /></button></span>
             </div>
+            <p v-if="item.agent" class="work-item-agent">事项 Agent · {{ item.agent.provider }} · {{ new Date(item.agent.updatedAt).toLocaleString('zh-CN') }} · {{ item.agent.evidenceIds.length }} 条引用</p>
             <div v-if="item.correction || item.projectCorrection" class="correction-note">
               <span><AppIcon name="edit" />人工纠正<span v-if="item.projectCorrection"> · 项目归属已调整</span><span v-if="item.correction"> · {{ date(item.correction.updatedAt) }}</span></span>
               <span class="correction-restore-actions"><button v-if="item.projectCorrection" :disabled="savingId === item.id" @click="restoreProjectAutomatic(item)"><AppIcon name="restore" />恢复自动归属</button><button v-if="item.correction" :disabled="savingId === item.id" @click="restoreAutomatic(item)"><AppIcon name="restore" />恢复自动内容</button></span>

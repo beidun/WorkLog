@@ -383,5 +383,10 @@ export function rebuildWorkItems(database: WorklogDatabase): number {
     }
   });
   transaction();
+  // Agent decisions intentionally do not have a foreign key to work_items:
+  // rebuilding derives new stable IDs from the current segment grouping. Drop
+  // decisions for IDs that disappeared so stale narratives cannot accumulate
+  // or be accidentally reattached after a later rebuild.
+  db.run("DELETE FROM work_item_agent_decisions WHERE work_item_id NOT IN (SELECT id FROM work_items)");
   return groups.length;
 }

@@ -1,5 +1,6 @@
 import type { WorklogDatabase } from "./db";
 import { normalizeWhitespace } from "./utils";
+import { getProjectAgentDecision } from "./agent/project-agent-store";
 
 export type WorkReportRange = "today" | "yesterday" | "week";
 export type WorkReportCategory = "active" | "completed" | "unverified" | "blocked";
@@ -45,6 +46,19 @@ export interface WorkReportProject {
   items: WorkReportItem[];
   carryoverItems: WorkReportItem[];
   counts: { active: number; completed: number; unverified: number; blocked: number; validations: number };
+  agent?: {
+    headline: string;
+    summary: string;
+    stage: string;
+    provider: string;
+    updatedAt: string;
+    completed: string[];
+    validations: string[];
+    blockers: string[];
+    remaining: string[];
+    evidenceIds: string[];
+    evidence: ReportEvidence[];
+  };
 }
 
 export interface WorkReportChange {
@@ -252,10 +266,15 @@ function countsForItems(items: WorkReportItem[]): ReportCounts {
   };
 }
 
-function currentCounts(candidates: Array<{ project_id: string; status: string }>, projectId: string): ReportCounts {
+function currentCounts(candidates: Array<{ project_id: string; status: string; last_activity_at: string | null }>, projectId: string, reference: number): ReportCounts {
   const projectItems = candidates.filter((item) => item.project_id === projectId);
+  const recent = projectItems.filter((item) => {
+    if (!item.last_activity_at) return false;
+    const timestamp = Date.parse(item.last_activity_at);
+    return Number.isFinite(timestamp) && reference - timestamp <= 30 * 24 * 60 * 60 * 1000;
+  });
   return {
-    active: projectItems.filter((item) => !["verified", "done_unverified", "abandoned", "blocked"].includes(item.status)).length,
+    active: recent.filter((item) => !["verified", "done_unverified", "abandoned", "blocked"].includes(item.status)).length,
     completed: projectItems.filter((item) => item.status === "verified").length,
     unverified: projectItems.filter((item) => item.status === "done_unverified").length,
     blocked: projectItems.filter((item) => item.status === "blocked").length,
@@ -360,12 +379,14 @@ function makeReportItem(
 function buildReport(database: WorklogDatabase, period: ReturnType<typeof workReportPeriod> | ReturnType<typeof dateReportPeriod>): WorkReport {
   const db = database.db;
   const candidates = db.query(`
-    SELECT wi.id,wi.project_id,p.name AS project_name,wi.title,wi.summary,wi.status,COALESCE(wi.next_step,'') AS next_step
+    SELECT wi.id,wi.project_id,p.name AS project_name,wi.title,wi.summary,wi.status,wi.last_activity_at,COALESCE(wi.next_step,'') AS next_step
     FROM work_items wi JOIN projects p ON p.id=wi.project_id
     ORDER BY p.name,wi.id
   `).all() as Array<{
-    id: string; project_id: string; project_name: string; title: string; summary: string; status: string; next_step: string;
+    id: string; project_id: string; project_name: string; title: string; summary: string; status: string; last_activity_at: string | null; next_step: string;
   }>;
+  const reportDates = candidates.map((item) => item.last_activity_at ? Date.parse(item.last_activity_at) : NaN).filter(Number.isFinite);
+  const reportReference = reportDates.length > 0 ? Math.max(...reportDates) : Date.now();
 
   const items: WorkReportItem[] = [];
   const carryoverItems: WorkReportItem[] = [];
@@ -411,8 +432,22 @@ function buildReport(database: WorklogDatabase, period: ReturnType<typeof workRe
       .sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
     const allProjectItems = [...projectItems, ...projectCarryover].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
     const counts = countsForItems(projectItems);
-    const current = currentCounts(candidates, projectId);
+    const current = currentCounts(candidates, projectId, reportReference);
     const todaySummary = projectTodaySummary(projectItems);
+    const agentDecision = getProjectAgentDecision(database, projectId);
+    const agent = agentDecision ? {
+      headline: agentDecision.headline,
+      summary: agentDecision.summary,
+      stage: agentDecision.stage,
+      provider: agentDecision.provider,
+      updatedAt: agentDecision.updatedAt,
+      completed: agentDecision.completed,
+      validations: agentDecision.validations,
+      blockers: agentDecision.blockers,
+      remaining: agentDecision.remaining,
+      evidenceIds: agentDecision.evidenceIds,
+      evidence: evidenceByIds(database, agentDecision.evidenceIds, 4),
+    } : undefined;
     return {
       id: projectId,
       name: allProjectItems[0].projectName,
@@ -422,6 +457,7 @@ function buildReport(database: WorklogDatabase, period: ReturnType<typeof workRe
       items: projectItems,
       carryoverItems: projectCarryover,
       counts,
+      agent,
     };
   }).sort((a, b) => {
     const aLast = [...a.items, ...a.carryoverItems].sort((x, y) => y.lastActivityAt.localeCompare(x.lastActivityAt))[0]?.lastActivityAt ?? "";

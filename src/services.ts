@@ -8,6 +8,8 @@ import { latestRepositorySnapshot } from "./repository-snapshots";
 import { getWorkItemCorrection } from "./work-item-corrections";
 import { getProjectCorrection } from "./project-corrections";
 import { getWorkItemFeedback } from "./work-item-feedback";
+import { currentProjectAgentDecision } from "./agent/project-agent-store";
+import { currentWorkItemAgentDecision } from "./agent/work-item-agent";
 
 const STATUS_LABELS: Record<string, string> = {
   planned: "计划中",
@@ -31,6 +33,9 @@ export interface ProjectProgressItem {
   confidence: number;
   evidenceCount: number;
   evidenceIds: string[];
+  agentProvider?: string;
+  agentUpdatedAt?: string;
+  agentEvidenceIds?: string[];
 }
 
 export interface ProjectWorkstream {
@@ -48,6 +53,9 @@ export interface ProjectWorkstream {
 export interface ProjectProgress {
   stage: ProjectProgressStage;
   stageLabel: string;
+  /** Model-derived stage kept separate from deterministic counters and guards. */
+  agentStage?: ProjectProgressStage;
+  agentStageLabel?: string;
   headline: string;
   summary: string;
   counts: { total: number; planned: number; active: number; completed: number; unverified: number; blocked: number };
@@ -58,6 +66,14 @@ export interface ProjectProgress {
   nextSteps: Array<{ text: string; workItemId: string; evidenceIds: string[] }>;
   evidence: Array<Record<string, unknown>>;
   confidence: number;
+  agent?: { headline: string; summary: string; stage: ProjectProgressStage; stageLabel: string; completed: string[]; validations: string[]; blockers: string[]; remaining: string[]; provider: string; updatedAt: string; evidenceIds: string[]; nextSteps: Array<{ text: string; workItemId?: string }> };
+}
+
+export interface AgentCoverage {
+  provider?: string;
+  sessions: { total: number; enhanced: number };
+  workItems: { total: number; enhanced: number };
+  projects: { total: number; enhanced: number };
 }
 
 const PROJECT_STAGE_LABELS: Record<ProjectProgressStage, string> = {
@@ -70,6 +86,11 @@ const PROJECT_STAGE_LABELS: Record<ProjectProgressStage, string> = {
 };
 
 function projectProgressItem(row: Record<string, unknown>, evidenceIds: string[] = []): ProjectProgressItem {
+  let agentEvidenceIds: string[] = [];
+  try {
+    const parsed = JSON.parse(String(row.agent_evidence_ids_json ?? "[]")) as unknown;
+    if (Array.isArray(parsed)) agentEvidenceIds = parsed.filter((value): value is string => typeof value === "string");
+  } catch { /* malformed legacy decision is ignored */ }
   return {
     id: String(row.id),
     title: String(row.title),
@@ -80,10 +101,17 @@ function projectProgressItem(row: Record<string, unknown>, evidenceIds: string[]
     confidence: Number(row.confidence ?? 0),
     evidenceCount: Number(row.evidence_count ?? evidenceIds.length),
     evidenceIds,
+    ...(row.agent_provider ? { agentProvider: String(row.agent_provider) } : {}),
+    ...(row.agent_updated_at ? { agentUpdatedAt: String(row.agent_updated_at) } : {}),
+    ...(agentEvidenceIds.length > 0 ? { agentEvidenceIds } : {}),
   };
 }
 
 const WORKSTREAM_WINDOW_MS = 45 * 24 * 60 * 60 * 1000;
+// A conversation that has not produced any activity for a month is historical
+// context, not a currently progressing item. Keep its original status in the
+// detail view, but exclude it from the headline "active" counters.
+const ACTIVE_RECENCY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const GENERIC_WORKSTREAM_TOKENS = new Set([
   "项目", "工作", "当前", "进度", "事项", "功能", "内容", "问题", "处理", "完成", "实现", "优化", "开发",
   "测试", "验证", "检查", "支持", "接入", "添加", "修改", "继续", "进行", "使用", "整理", "分析", "历史",
@@ -115,33 +143,44 @@ function workstreamDate(item: ProjectProgressItem): number | null {
   return Number.isFinite(timestamp) ? timestamp : null;
 }
 
-function stageForItems(items: ProjectProgressItem[]): { stage: ProjectProgressStage; stageLabel: string; current: ProjectProgressItem; counts: ProjectWorkstream["counts"] } {
+function activityReference(items: ProjectProgressItem[], fallback = Date.now()): number {
+  const dates = items.map(workstreamDate).filter((value): value is number => value !== null);
+  return dates.length > 0 ? Math.max(...dates) : fallback;
+}
+
+function isRecentlyActive(item: ProjectProgressItem, reference: number): boolean {
+  const timestamp = workstreamDate(item);
+  return timestamp !== null && reference - timestamp <= ACTIVE_RECENCY_WINDOW_MS;
+}
+
+function stageForItems(items: ProjectProgressItem[], reference = activityReference(items)): { stage: ProjectProgressStage; stageLabel: string; current: ProjectProgressItem; counts: ProjectWorkstream["counts"] } {
   const byRecent = (left: ProjectProgressItem, right: ProjectProgressItem) => (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? "");
   const active = items.filter((item) => ["in_progress", "partially_done", "done_unverified"].includes(item.status)).sort(byRecent);
+  const currentActive = active.filter((item) => isRecentlyActive(item, reference));
   const completed = items.filter((item) => item.status === "verified").sort(byRecent);
   const blocked = items.filter((item) => item.status === "blocked").sort(byRecent);
   const planned = items.filter((item) => item.status === "planned").sort(byRecent);
   const counts = {
     total: items.length,
     planned: planned.length,
-    active: items.filter((item) => ["in_progress", "partially_done"].includes(item.status)).length,
+    active: currentActive.filter((item) => ["in_progress", "partially_done"].includes(item.status)).length,
     completed: completed.length,
     unverified: items.filter((item) => item.status === "done_unverified").length,
     blocked: blocked.length,
   };
-  const current = blocked[0] ?? active[0] ?? planned[0] ?? completed[0] ?? items[0]!;
-  const hasWork = active.length > 0 || planned.length > 0;
+  const current = blocked[0] ?? currentActive[0] ?? planned[0] ?? completed[0] ?? active[0] ?? items[0]!;
+  const hasWork = currentActive.length > 0 || planned.length > 0;
   let stage: ProjectProgressStage;
   if (blocked.length > 0) stage = "blocked";
   else if (hasWork && completed.length > 0) stage = "mixed";
-  else if (active.length > 0) stage = "implementation";
+  else if (currentActive.length > 0) stage = "implementation";
   else if (counts.unverified > 0) stage = "validation";
   else if (planned.length > 0) stage = "planning";
   else stage = "completed";
   return { stage, stageLabel: PROJECT_STAGE_LABELS[stage], current, counts };
 }
 
-function automaticWorkstreams(database: WorklogDatabase, projectId: string, items: ProjectProgressItem[], includeEvidence: boolean): ProjectWorkstream[] {
+function automaticWorkstreams(database: WorklogDatabase, projectId: string, items: ProjectProgressItem[], includeEvidence: boolean, reference = activityReference(items)): ProjectWorkstream[] {
   if (items.length === 0) return [];
   const fileRows = database.db.query(`
     SELECT wis.work_item_id,e.file_paths_json
@@ -206,7 +245,7 @@ function automaticWorkstreams(database: WorklogDatabase, projectId: string, item
   const byRecent = (left: ProjectProgressItem, right: ProjectProgressItem) => (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? "");
   return [...groups.values()].map((group) => {
     const ordered = group.slice().sort(byRecent);
-    const progress = stageForItems(ordered);
+    const progress = stageForItems(ordered, reference);
     const evidenceIds = [...new Set(ordered.flatMap((item) => item.evidenceIds))];
     return {
       id: stableId("workstream", projectId, ...ordered.map((item) => item.id).sort()),
@@ -231,8 +270,9 @@ function automaticWorkstreams(database: WorklogDatabase, projectId: string, item
 export function getProjectProgress(database: WorklogDatabase, projectId: string, includeEvidence = false): ProjectProgress | null {
   const rows = database.db.query(`
     SELECT wi.id,wi.title,wi.summary,wi.status,wi.next_step,wi.last_activity_at,wi.confidence,
+      wa.provider AS agent_provider,wa.updated_at AS agent_updated_at,wa.evidence_ids_json AS agent_evidence_ids_json,
       (SELECT COUNT(*) FROM work_item_evidence wie WHERE wie.work_item_id=wi.id) AS evidence_count
-    FROM work_items wi WHERE wi.project_id=?
+    FROM work_items wi LEFT JOIN work_item_agent_decisions wa ON wa.work_item_id=wi.id WHERE wi.project_id=?
     ORDER BY CASE wi.status
       WHEN 'blocked' THEN 0 WHEN 'partially_done' THEN 1 WHEN 'in_progress' THEN 2
       WHEN 'done_unverified' THEN 3 WHEN 'planned' THEN 4 WHEN 'verified' THEN 5 ELSE 6 END,
@@ -250,26 +290,29 @@ export function getProjectProgress(database: WorklogDatabase, projectId: string,
     for (const row of evidenceRows) itemEvidence.set(row.work_item_id, [...(itemEvidence.get(row.work_item_id) ?? []), row.event_id]);
   }
   const items = rows.map((row) => projectProgressItem(row, itemEvidence.get(String(row.id)) ?? []));
+  const latestActivity = database.db.query("SELECT MAX(last_activity_at) AS latest FROM work_items WHERE last_activity_at IS NOT NULL").get() as { latest: string | null };
+  const reference = latestActivity?.latest && Number.isFinite(Date.parse(latestActivity.latest)) ? Date.parse(latestActivity.latest) : Date.now();
   const byRecent = (left: ProjectProgressItem, right: ProjectProgressItem) => (right.lastActivityAt ?? "").localeCompare(left.lastActivityAt ?? "");
   const active = items.filter((item) => ["in_progress", "partially_done", "done_unverified"].includes(item.status)).sort(byRecent);
+  const currentActive = active.filter((item) => isRecentlyActive(item, reference));
   const completed = items.filter((item) => item.status === "verified").sort(byRecent);
   const blocked = items.filter((item) => item.status === "blocked").sort(byRecent);
   const planned = items.filter((item) => item.status === "planned").sort(byRecent);
   const counts = {
     total: items.length,
     planned: planned.length,
-    active: items.filter((item) => ["in_progress", "partially_done"].includes(item.status)).length,
+    active: currentActive.filter((item) => ["in_progress", "partially_done"].includes(item.status)).length,
     completed: completed.length,
     unverified: items.filter((item) => item.status === "done_unverified").length,
     blocked: blocked.length,
   };
-  const current = items.find((item) => item.status === "blocked") ?? active[0] ?? planned[0] ?? completed[0] ?? items[0]!;
+  const current = items.find((item) => item.status === "blocked") ?? currentActive[0] ?? planned[0] ?? completed[0] ?? active[0] ?? items[0]!;
   const hasCompleted = completed.length > 0;
-  const hasWork = active.length > 0 || planned.length > 0;
+  const hasWork = currentActive.length > 0 || planned.length > 0;
   let stage: ProjectProgressStage;
   if (blocked.length > 0) stage = "blocked";
   else if (hasWork && hasCompleted) stage = "mixed";
-  else if (active.length > 0) stage = "implementation";
+  else if (currentActive.length > 0) stage = "implementation";
   else if (counts.unverified > 0) stage = "validation";
   else if (planned.length > 0) stage = "planning";
   else stage = "completed";
@@ -277,8 +320,8 @@ export function getProjectProgress(database: WorklogDatabase, projectId: string,
   const stageLabel = PROJECT_STAGE_LABELS[stage];
   const headline = blocked.length > 0
     ? `当前受阻：${blocked[0]!.title}`
-    : active.length > 0
-      ? `当前推进：${active[0]!.title}`
+    : currentActive.length > 0
+      ? `当前推进：${currentActive[0]!.title}`
       : counts.unverified > 0
         ? `待验证：${items.find((item) => item.status === "done_unverified")!.title}`
         : completed.length > 0
@@ -291,20 +334,62 @@ export function getProjectProgress(database: WorklogDatabase, projectId: string,
   if (counts.blocked > 0) summaryParts.push(`受阻 ${counts.blocked} 项`);
   if (counts.planned > 0) summaryParts.push(`规划中 ${counts.planned} 项`);
   const summary = `${current.summary}${summaryParts.length > 0 ? `；${summaryParts.join("，")}` : ""}`.slice(0, 360);
-  const nextSteps = [...blocked, ...active, ...planned]
+  const deterministicNextSteps = [...blocked, ...currentActive, ...planned]
     .filter((item) => item.nextStep)
     .slice(0, 5)
     .map((item) => ({ text: item.nextStep, workItemId: item.id, evidenceIds: item.evidenceIds }));
   const confidence = Math.round((items.reduce((sum, item) => sum + item.confidence, 0) / items.length) * 100) / 100;
-  const evidence = includeEvidence ? database.db.query(`
+  const agentDecision = currentProjectAgentDecision(database, projectId);
+  let evidence = includeEvidence ? database.db.query(`
     SELECT DISTINCT e.id,e.source,e.source_file,e.source_line,e.event_type,e.tool_name,e.timestamp,e.is_error,
       wie.evidence_kind,
       substr(COALESCE(NULLIF(e.command,''),NULLIF(e.content,''),e.tool_name,e.event_type),1,180) AS preview
     FROM work_item_evidence wie JOIN events e ON e.id=wie.event_id JOIN work_items wi ON wi.id=wie.work_item_id
     WHERE wi.project_id=? ORDER BY e.timestamp DESC,e.source_line DESC LIMIT 8
   `).all(projectId) as Array<Record<string, unknown>> : [];
-  const workstreams = automaticWorkstreams(database, projectId, items, includeEvidence);
-  return { stage, stageLabel, headline, summary, counts, active, completed: completed.slice(0, 5), blocked, workstreams, nextSteps, evidence, confidence };
+  if (includeEvidence && agentDecision && agentDecision.evidenceIds.length > 0) {
+    const agentEvidence = database.db.query(`
+      SELECT DISTINCT e.id,e.source,e.source_file,e.source_line,e.event_type,e.tool_name,e.timestamp,e.is_error,
+        'agent' AS evidence_kind,
+        substr(COALESCE(NULLIF(e.command,''),NULLIF(e.content,''),e.tool_name,e.event_type),1,180) AS preview
+      FROM events e WHERE e.id IN (${agentDecision.evidenceIds.map(() => "?").join(",")})
+    `).all(...agentDecision.evidenceIds) as Array<Record<string, unknown>>;
+    evidence = [...agentEvidence, ...evidence.filter((item) => !agentDecision.evidenceIds.includes(String(item.id)))].slice(0, 12);
+  }
+  const workstreams = automaticWorkstreams(database, projectId, items, includeEvidence, reference);
+  const agent = agentDecision ? {
+    headline: agentDecision.headline,
+    summary: agentDecision.summary,
+    stage: agentDecision.stage,
+    stageLabel: PROJECT_STAGE_LABELS[agentDecision.stage],
+    completed: agentDecision.completed,
+    validations: agentDecision.validations,
+    blockers: agentDecision.blockers,
+    remaining: agentDecision.remaining,
+    provider: agentDecision.provider,
+    updatedAt: agentDecision.updatedAt,
+    evidenceIds: agentDecision.evidenceIds,
+    nextSteps: agentDecision.nextSteps,
+  } : undefined;
+  const agentNextSteps = (agentDecision?.nextSteps ?? [])
+    .map((step) => {
+      const item = step.workItemId ? items.find((candidate) => candidate.id === step.workItemId) : undefined;
+      return item ? { text: step.text, workItemId: item.id, evidenceIds: item.evidenceIds } : null;
+    })
+    .filter((step): step is { text: string; workItemId: string; evidenceIds: string[] } => Boolean(step));
+  const nextSteps = [...agentNextSteps, ...deterministicNextSteps]
+    .filter((step, index, all) => all.findIndex((candidate) => candidate.text === step.text) === index)
+    .slice(0, 5);
+  return {
+    stage, stageLabel,
+    agentStage: agent?.stage,
+    agentStageLabel: agent?.stageLabel,
+    headline: agent && blocked.length === 0 ? agent.headline : headline,
+    summary: agent && blocked.length === 0
+      ? `${agent.summary}${summaryParts.length > 0 ? `；${summaryParts.join("，")}` : ""}`.slice(0, 360)
+      : summary,
+    counts, active: currentActive, completed: completed.slice(0, 5), blocked, workstreams, nextSteps, evidence, confidence, agent,
+  };
 }
 
 export function getOverview(database: WorklogDatabase) {
@@ -327,9 +412,30 @@ export function getOverview(database: WorklogDatabase) {
   `).all() as Array<Record<string, unknown> & { id: string }>;
   const projects = projectRows.map((project) => {
     const progress = getProjectProgress(database, project.id);
-    return { ...project, current_focus: progress?.summary ?? null, progress };
+    // Use the same recency-aware progress calculation as the project detail.
+    // The SQL count includes every historical in_progress row and was the
+    // source of misleading numbers such as "354 in progress".
+    return { ...project, active_count: progress?.counts.active ?? 0, current_focus: progress?.summary ?? null, progress };
   });
   const workItems = db.query("SELECT status, last_activity_at FROM work_items").all() as Array<{ status: string; last_activity_at: string | null }>;
+  const activityDates = workItems.map((item) => item.last_activity_at ? Date.parse(item.last_activity_at) : NaN).filter(Number.isFinite);
+  const activityReferenceAt = activityDates.length > 0 ? Math.max(...activityDates) : Date.now();
+  const recentEnough = (value: string | null): boolean => {
+    const timestamp = value ? Date.parse(value) : NaN;
+    return Number.isFinite(timestamp) && activityReferenceAt - timestamp <= ACTIVE_RECENCY_WINDOW_MS;
+  };
+  const attentionItems = db.query(`SELECT wi.id, wi.title, wi.summary, wi.status, wi.next_step, wi.last_activity_at,
+      wi.project_id, p.name AS project_name
+      FROM work_items wi JOIN projects p ON p.id=wi.project_id
+      WHERE wi.status IN ('blocked','done_unverified','partially_done')
+      ORDER BY CASE wi.status WHEN 'blocked' THEN 0 WHEN 'partially_done' THEN 1 ELSE 2 END, wi.last_activity_at DESC LIMIT 64`).all() as Array<{ status: string; last_activity_at: string | null; [key: string]: unknown }>;
+  const currentAttention = attentionItems.filter((item) => item.status === "blocked" || recentEnough(item.last_activity_at));
+  const sessionTotals = db.query("SELECT COUNT(*) AS total, SUM(CASE WHEN provider LIKE 'openai-compatible:%' THEN 1 ELSE 0 END) AS enhanced FROM session_digests").get() as { total: number; enhanced: number };
+  const workItemTotals = db.query(`SELECT COUNT(*) AS total,
+      (SELECT COUNT(*) FROM work_item_agent_decisions) AS enhanced
+      FROM work_items wi WHERE EXISTS (SELECT 1 FROM work_item_evidence wie WHERE wie.work_item_id=wi.id)`).get() as { total: number; enhanced: number };
+  const projectEnhanced = projects.filter((project) => Boolean(project.progress?.agent)).length;
+  const provider = db.query(`SELECT provider FROM project_agent_decisions UNION ALL SELECT provider FROM work_item_agent_decisions UNION ALL SELECT provider FROM session_digests WHERE provider LIKE 'openai-compatible:%' ORDER BY provider DESC LIMIT 1`).get() as { provider?: string } | null;
   const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
   const todayItems = workItems.filter((item) => item.last_activity_at && new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date(item.last_activity_at)) === today);
   const sourceCounts = db.query("SELECT source, COUNT(*) AS count FROM sessions WHERE is_subagent=0 GROUP BY source").all();
@@ -338,16 +444,18 @@ export function getOverview(database: WorklogDatabase) {
     generatedAt: new Date().toISOString(),
     metrics: {
       projects: projects.length,
-      active: workItems.filter((item) => ["in_progress", "partially_done"].includes(item.status)).length,
+      active: projects.reduce((sum, project) => sum + Number(project.active_count ?? 0), 0),
       verifiedToday: todayItems.filter((item) => item.status === "verified").length,
-      needsAttention: workItems.filter((item) => ["blocked", "partially_done", "done_unverified"].includes(item.status)).length,
+      needsAttention: currentAttention.length,
     },
+    agentCoverage: {
+      ...(provider?.provider ? { provider: provider.provider } : {}),
+      sessions: { total: Number(sessionTotals?.total ?? 0), enhanced: Number(sessionTotals?.enhanced ?? 0) },
+      workItems: { total: Number(workItemTotals?.total ?? 0), enhanced: Number(workItemTotals?.enhanced ?? 0) },
+      projects: { total: projects.length, enhanced: projectEnhanced },
+    } satisfies AgentCoverage,
     projects,
-    attention: db.query(`SELECT wi.id, wi.title, wi.summary, wi.status, wi.next_step, wi.last_activity_at,
-      wi.project_id, p.name AS project_name
-      FROM work_items wi JOIN projects p ON p.id=wi.project_id
-      WHERE wi.status IN ('blocked','done_unverified','partially_done')
-      ORDER BY CASE wi.status WHEN 'blocked' THEN 0 WHEN 'partially_done' THEN 1 ELSE 2 END, wi.last_activity_at DESC LIMIT 8`).all(),
+    attention: currentAttention.slice(0, 8),
     sourceCounts,
     scan,
     recentChanges: latestProgressChanges(database, 8).map((change) => ({
@@ -369,19 +477,28 @@ export function getProject(database: WorklogDatabase, id: string) {
   const project = db.query("SELECT * FROM projects WHERE id=?").get(id);
   if (!project) return null;
   const workItemRows = db.query(`
-    SELECT wi.*,
+    SELECT wi.*,wa.provider AS agent_provider,wa.updated_at AS agent_updated_at,wa.evidence_ids_json AS agent_evidence_ids_json,
       (SELECT COUNT(*) FROM work_item_sessions wis WHERE wis.work_item_id=wi.id) AS session_count,
       (SELECT COUNT(*) FROM work_item_evidence wie WHERE wie.work_item_id=wi.id) AS evidence_count
-    FROM work_items wi WHERE wi.project_id=? ORDER BY wi.last_activity_at DESC
+    FROM work_items wi LEFT JOIN work_item_agent_decisions wa ON wa.work_item_id=wi.id WHERE wi.project_id=? ORDER BY wi.last_activity_at DESC
   `).all(id) as Array<Record<string, unknown> & { id: string }>;
-  const workItems = workItemRows.map((item) => ({
-    ...item,
-    correction: getWorkItemCorrection(database, item.id),
-    projectCorrection: getProjectCorrection(database, item.id),
-    feedback: getWorkItemFeedback(database, item.id),
-    evidence: getWorkItemEvidence(database, item.id),
-    progress: getWorkItemProgress(database, item.id),
-  }));
+  const workItems = workItemRows.map((item) => {
+    const { agent_provider, agent_updated_at, agent_evidence_ids_json, ...publicItem } = item;
+    const agentDecision = currentWorkItemAgentDecision(database, item.id);
+    return {
+      ...publicItem,
+      agent: agentDecision ? {
+        provider: agentDecision.provider,
+        updatedAt: agentDecision.updatedAt,
+        evidenceIds: agentDecision.evidenceIds,
+      } : null,
+      correction: getWorkItemCorrection(database, item.id),
+      projectCorrection: getProjectCorrection(database, item.id),
+      feedback: getWorkItemFeedback(database, item.id),
+      evidence: getWorkItemEvidence(database, item.id),
+      progress: getWorkItemProgress(database, item.id),
+    };
+  });
   const timeline = db.query(`
     SELECT e.id, e.event_type, e.timestamp, e.tool_name, e.is_error, e.content, e.command,
       e.source, e.session_id, e.source_file, e.source_line,
@@ -463,6 +580,10 @@ function stringList(value: string): string[] {
 }
 
 function getWorkItemProgress(database: WorklogDatabase, workItemId: string) {
+  // A model decision is presentation data only. Re-check its input hash before
+  // exposing it; changed evidence must fall back to deterministic segment facts
+  // until the next Agent run succeeds.
+  const agentDecision = currentWorkItemAgentDecision(database, workItemId);
   const segmentRows = database.db.query(`
     SELECT ws.objective,ws.headline,ws.progress_summary,ws.completed_json,ws.validations_json,
       ws.blockers_json,ws.remaining_json,ws.status,ws.next_step,ws.last_event_at
@@ -486,7 +607,7 @@ function getWorkItemProgress(database: WorklogDatabase, workItemId: string) {
       WHERE wis.work_item_id=?
       ORDER BY sf.rank LIMIT 12
     `).all(workItemId);
-    return {
+    const progress = {
       objective: latest.objective,
       headline: latest.headline,
       summary: latest.progress_summary,
@@ -498,6 +619,17 @@ function getWorkItemProgress(database: WorklogDatabase, workItemId: string) {
       remaining: ["verified", "abandoned"].includes(latest.status) ? [] : stringList(latest.remaining_json),
       facts,
     };
+    return agentDecision ? {
+      ...progress,
+      headline: agentDecision.title,
+      summary: agentDecision.summary,
+      status: agentDecision.status,
+      nextStep: agentDecision.nextStep,
+      completed: agentDecision.completed,
+      validations: agentDecision.validations,
+      blockers: agentDecision.blockers,
+      remaining: agentDecision.remaining,
+    } : progress;
   }
   const rows = database.db.query(`
     SELECT d.objective,d.headline,d.progress_summary,d.completed_json,d.validations_json,
@@ -525,7 +657,7 @@ function getWorkItemProgress(database: WorklogDatabase, workItemId: string) {
       CASE sf.fact_kind WHEN 'finding' THEN 0 WHEN 'change' THEN 1 WHEN 'validation' THEN 2 WHEN 'risk' THEN 3 ELSE 4 END,
       sf.rank LIMIT 12
   `).all(workItemId);
-  return {
+  const progress = {
     objective: latest.objective,
     headline: latest.headline,
     summary: latest.progress_summary,
@@ -537,6 +669,17 @@ function getWorkItemProgress(database: WorklogDatabase, workItemId: string) {
     remaining: ["verified", "abandoned"].includes(latest.status) ? [] : stringList(latest.remaining_json),
     facts,
   };
+  return agentDecision ? {
+    ...progress,
+    headline: agentDecision.title,
+    summary: agentDecision.summary,
+    status: agentDecision.status,
+    nextStep: agentDecision.nextStep,
+    completed: agentDecision.completed,
+    validations: agentDecision.validations,
+    blockers: agentDecision.blockers,
+    remaining: agentDecision.remaining,
+  } : progress;
 }
 
 export function getDailyReport(database: WorklogDatabase, date?: string) {

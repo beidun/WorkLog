@@ -105,6 +105,85 @@ export class WorklogDatabase {
         FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
       );
 
+      CREATE TABLE IF NOT EXISTS agent_runs (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        scope TEXT NOT NULL DEFAULT 'session',
+        project_id TEXT,
+        work_item_id TEXT,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_run_steps (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL,
+        phase TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        at TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        UNIQUE(run_id, ordinal),
+        FOREIGN KEY(run_id) REFERENCES agent_runs(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS agent_failures (
+        scope TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        error TEXT NOT NULL DEFAULT '',
+        failed_at TEXT NOT NULL,
+        PRIMARY KEY(scope, target_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS project_agent_decisions (
+        project_id TEXT PRIMARY KEY,
+        input_hash TEXT NOT NULL,
+        headline TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        validations_json TEXT NOT NULL DEFAULT '[]',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+        next_steps_json TEXT NOT NULL DEFAULT '[]',
+        provider TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+      );
+
+      CREATE TABLE IF NOT EXISTS work_item_agent_decisions (
+        work_item_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        title TEXT NOT NULL,
+        summary TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL,
+        completed_json TEXT NOT NULL DEFAULT '[]',
+        validations_json TEXT NOT NULL DEFAULT '[]',
+        blockers_json TEXT NOT NULL DEFAULT '[]',
+        remaining_json TEXT NOT NULL DEFAULT '[]',
+        next_step TEXT NOT NULL DEFAULT '',
+        evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+        provider TEXT NOT NULL,
+        confidence REAL NOT NULL DEFAULT 0,
+        trace_session_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS session_digest_evidence (
         session_id TEXT NOT NULL,
         event_id TEXT NOT NULL,
@@ -332,6 +411,9 @@ export class WorklogDatabase {
       CREATE INDEX IF NOT EXISTS idx_session_facts_session_kind ON session_facts(session_id, fact_kind, rank);
       CREATE INDEX IF NOT EXISTS idx_work_items_project_status ON work_items(project_id, status, last_activity_at DESC);
       CREATE INDEX IF NOT EXISTS idx_work_segments_session_range ON work_segments(session_id, start_line, end_line);
+      CREATE INDEX IF NOT EXISTS idx_project_agent_decisions_updated ON project_agent_decisions(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_agent_failures_failed_at ON agent_failures(failed_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_work_item_agent_decisions_updated ON work_item_agent_decisions(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_work_item_segments_item ON work_item_segments(work_item_id, segment_id);
       CREATE INDEX IF NOT EXISTS idx_work_item_corrections_updated ON work_item_corrections(updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_project_corrections_updated ON project_corrections(updated_at DESC);
@@ -341,7 +423,25 @@ export class WorklogDatabase {
       CREATE INDEX IF NOT EXISTS idx_progress_changes_snapshot ON progress_changes(snapshot_id, detected_at DESC);
       CREATE INDEX IF NOT EXISTS idx_repository_snapshots_project_time ON repository_snapshots(project_id, captured_at DESC);
     `);
+    this.migrateProjectAgentDecisions();
+    this.migrateAgentRuns();
     this.migrateWorkItemFeedback();
+  }
+
+  private migrateAgentRuns(): void {
+    const columns = this.db.query("PRAGMA table_info(agent_runs)").all() as Array<{ name: string }>;
+    const existing = new Set(columns.map((column) => column.name));
+    if (!existing.has("scope")) this.db.run("ALTER TABLE agent_runs ADD COLUMN scope TEXT NOT NULL DEFAULT 'session'");
+    if (!existing.has("project_id")) this.db.run("ALTER TABLE agent_runs ADD COLUMN project_id TEXT");
+    if (!existing.has("work_item_id")) this.db.run("ALTER TABLE agent_runs ADD COLUMN work_item_id TEXT");
+  }
+
+  private migrateProjectAgentDecisions(): void {
+    const columns = this.db.query("PRAGMA table_info(project_agent_decisions)").all() as Array<{ name: string }>;
+    const existing = new Set(columns.map((column) => column.name));
+    for (const column of ["completed_json", "validations_json", "blockers_json", "remaining_json"]) {
+      if (!existing.has(column)) this.db.run(`ALTER TABLE project_agent_decisions ADD COLUMN ${column} TEXT NOT NULL DEFAULT '[]'`);
+    }
   }
 
   private migrateWorkItemFeedback(): void {

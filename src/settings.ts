@@ -1,6 +1,6 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { LlmConfig, LlmMode } from "./config";
+import type { LlmConfig, LlmMode, LlmProtocol } from "./config";
 
 const SETTINGS_FILE = "settings.json";
 const MODES = new Set<LlmMode>(["off", "local", "remote"]);
@@ -9,11 +9,14 @@ export const LLM_ENVIRONMENT_FIELDS = {
   WORKLOG_LLM_MODE: "mode",
   WORKLOG_LLM_BASE_URL: "baseUrl",
   WORKLOG_LLM_MODEL: "model",
+  WORKLOG_LLM_PROTOCOL: "protocol",
   WORKLOG_LLM_API_KEY: "apiKey",
   WORKLOG_LLM_ALLOW_REMOTE: "allowRemote",
   WORKLOG_LLM_TIMEOUT_MS: "timeoutMs",
   WORKLOG_LLM_MAX_INPUT_CHARS: "maxInputChars",
   WORKLOG_LLM_MAX_SESSIONS_PER_SCAN: "maxSessionsPerScan",
+  WORKLOG_LLM_MAX_WORK_ITEMS_PER_SCAN: "maxWorkItemsPerScan",
+  WORKLOG_LLM_MAX_PROJECTS_PER_SCAN: "maxProjectsPerScan",
   WORKLOG_LLM_RETRY_FAILED: "retryFailed",
 } as const;
 
@@ -25,18 +28,21 @@ export interface LlmSettingsUpdate {
   mode: LlmMode;
   baseUrl: string;
   model: string;
+  protocol?: LlmProtocol;
   apiKey?: string;
   clearApiKey?: boolean;
   allowRemote: boolean;
   timeoutMs: number;
   maxInputChars: number;
   maxSessionsPerScan: number;
+  maxWorkItemsPerScan: number;
+  maxProjectsPerScan: number;
   retryFailed: boolean;
 }
 
 export interface PublicLlmSettings extends Omit<LlmConfig, "apiKey"> {
   hasApiKey: boolean;
-  source: "env" | "file" | "default";
+  source: "env" | "file" | "ccswitch" | "default";
   environmentOverrides: string[];
 }
 
@@ -76,11 +82,14 @@ function parseStoredLlm(value: unknown): Partial<LlmConfig> | undefined {
     ...(mode !== undefined ? { mode: mode as LlmMode } : {}),
     ...(record.baseUrl !== undefined ? { baseUrl: optionalString(record.baseUrl, "llm.baseUrl", 2_048)! } : {}),
     ...(record.model !== undefined ? { model: optionalString(record.model, "llm.model", 256)! } : {}),
+    ...(record.protocol !== undefined ? { protocol: record.protocol === "responses" ? "responses" as LlmProtocol : record.protocol === "anthropic_messages" ? "anthropic_messages" as LlmProtocol : record.protocol === "chat_completions" ? "chat_completions" as LlmProtocol : invalid("llm.protocol must be chat_completions, responses or anthropic_messages") } : {}),
     ...(record.apiKey !== undefined ? { apiKey: optionalString(record.apiKey, "llm.apiKey", 4_096) || undefined } : {}),
     ...(record.allowRemote !== undefined ? { allowRemote: optionalBoolean(record.allowRemote, "llm.allowRemote")! } : {}),
     ...(record.timeoutMs !== undefined ? { timeoutMs: optionalInteger(record.timeoutMs, "llm.timeoutMs", 1_000, 300_000)! } : {}),
     ...(record.maxInputChars !== undefined ? { maxInputChars: optionalInteger(record.maxInputChars, "llm.maxInputChars", 2_000, 200_000)! } : {}),
     ...(record.maxSessionsPerScan !== undefined ? { maxSessionsPerScan: optionalInteger(record.maxSessionsPerScan, "llm.maxSessionsPerScan", 1, 200)! } : {}),
+    ...(record.maxWorkItemsPerScan !== undefined ? { maxWorkItemsPerScan: optionalInteger(record.maxWorkItemsPerScan, "llm.maxWorkItemsPerScan", 1, 200)! } : {}),
+    ...(record.maxProjectsPerScan !== undefined ? { maxProjectsPerScan: optionalInteger(record.maxProjectsPerScan, "llm.maxProjectsPerScan", 1, 100)! } : {}),
     ...(record.retryFailed !== undefined ? { retryFailed: optionalBoolean(record.retryFailed, "llm.retryFailed")! } : {}),
   };
 }
@@ -135,7 +144,7 @@ function requiredInteger(value: unknown, name: string, minimum: number, maximum:
   return parsed;
 }
 
-export function parseLlmSettingsUpdate(value: unknown, existingApiKey?: string): LlmConfig {
+export function parseLlmSettingsUpdate(value: unknown, existingApiKey?: string, existingProtocol: LlmProtocol = "chat_completions"): LlmConfig {
   if (!value || typeof value !== "object" || Array.isArray(value)) invalid("request body must be an object");
   const record = value as Record<string, unknown>;
   if (typeof record.mode !== "string" || !MODES.has(record.mode as LlmMode)) invalid("mode must be off, local or remote");
@@ -146,11 +155,14 @@ export function parseLlmSettingsUpdate(value: unknown, existingApiKey?: string):
     mode: record.mode as LlmMode,
     baseUrl: requiredString(record.baseUrl, "baseUrl", 2_048),
     model: requiredString(record.model, "model", 256),
+    protocol: record.protocol === undefined ? existingProtocol : (record.protocol === "responses" || record.protocol === "chat_completions" || record.protocol === "anthropic_messages" ? record.protocol : invalid("protocol must be chat_completions, responses or anthropic_messages")),
     apiKey,
     allowRemote: requiredBoolean(record.allowRemote, "allowRemote"),
     timeoutMs: requiredInteger(record.timeoutMs, "timeoutMs", 1_000, 300_000),
     maxInputChars: requiredInteger(record.maxInputChars, "maxInputChars", 2_000, 200_000),
     maxSessionsPerScan: requiredInteger(record.maxSessionsPerScan, "maxSessionsPerScan", 1, 200),
+    maxWorkItemsPerScan: requiredInteger(record.maxWorkItemsPerScan, "maxWorkItemsPerScan", 1, 200),
+    maxProjectsPerScan: requiredInteger(record.maxProjectsPerScan, "maxProjectsPerScan", 1, 100),
     retryFailed: requiredBoolean(record.retryFailed, "retryFailed"),
   };
 }
@@ -168,7 +180,7 @@ export function publicLlmSettings(config: LlmConfig, dataDir: string): PublicLlm
   return {
     ...safe,
     hasApiKey: Boolean(apiKey),
-    source: overrides.length > 0 ? "env" : (hasFileSettings ? "file" : "default"),
+    source: overrides.length > 0 ? "env" : (hasFileSettings ? "file" : (config.mode === "off" ? "default" : "ccswitch")),
     environmentOverrides: overrides,
   };
 }

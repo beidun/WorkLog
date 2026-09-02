@@ -6,6 +6,7 @@ import { WorklogDatabase } from "../src/db";
 import { getWorkReport, getWorkReportForDate, workReportPeriod } from "../src/work-reports";
 import { rebuildSessionDigests } from "../src/session-digests";
 import { rebuildWorkItems } from "../src/work-items";
+import { saveProjectAgentDecision } from "../src/agent/project-agent-store";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -226,6 +227,22 @@ describe("work reports", () => {
     expect(item?.changeSummary.some((value) => value.includes("接口联调补充了异常重试"))).toBe(true);
     expect(item?.changeSummary.some((value) => value.includes("本时段有 2 段"))).toBe(false);
     expect(report.projects[0]?.todaySummary).toContain("接口联调补充了异常重试");
+    db.close();
+  });
+
+  test("surfaces the persisted project-agent judgment without replacing period activity", () => {
+    const { db, seed } = fixture();
+    seed({ projectId: "agent-report", projectName: "Agent 报告项目", externalId: "agent-report-session", timestamp: "2026-08-12T16:00:00.000Z", topic: "数据核查" });
+    rebuildWorkItems(db);
+    saveProjectAgentDecision(db, {
+      projectId: "agent-report", inputHash: "agent-hash", headline: "项目主线已收敛",
+      summary: "Agent 根据工具结果确认主链路正常。", completed: ["主链路核查"], validations: ["结果一致"], blockers: [], remaining: ["继续观察增量"],
+      stage: "validation", evidenceIds: ["agent-report-session-event"], nextSteps: [], provider: "fake:agent", confidence: 0.84,
+    });
+    const report = getWorkReportForDate(db, "2026-08-13");
+    expect(report.projects[0]?.todaySummary).toContain("数据核查");
+    expect(report.projects[0]?.agent).toMatchObject({ headline: "项目主线已收敛", stage: "validation", provider: "fake:agent", remaining: ["继续观察增量"] });
+    expect(report.projects[0]?.agent?.evidence.map((item) => item.id)).toEqual(["agent-report-session-event"]);
     db.close();
   });
 });
