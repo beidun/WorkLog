@@ -225,7 +225,14 @@ onMounted(loadOverview);
     <Sidebar :active="activeSection" :source-counts="overview?.sourceCounts ?? []" @navigate="navigate" />
     <main class="main-area">
       <header class="topbar">
-        <div class="search-box"><AppIcon name="search" /><input v-model="query" aria-label="搜索项目" placeholder="搜索项目或工作事项" /></div>
+        <div class="topbar-leading">
+          <div class="search-box">
+            <AppIcon name="search" />
+            <input v-model="query" aria-label="搜索项目" placeholder="搜索项目或工作事项" />
+            <button v-if="query" class="search-clear" aria-label="清除搜索" @click="query = ''"><AppIcon name="close" /></button>
+          </div>
+          <span class="topbar-context"><span class="live-dot"></span>本机工作区</span>
+        </div>
         <button class="scan-button" aria-label="扫描新记录" :disabled="scanning" @click="startScan"><AppIcon name="scan" /><span>{{ scanLabel }}</span></button>
       </header>
 
