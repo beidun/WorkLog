@@ -161,6 +161,15 @@ async function api(request: Request, url: URL): Promise<Response | null> {
     void runFullScan(config, database).catch((error) => console.error(error));
     return json({ status: "started" }, 202);
   }
+  const projectAnalyzeMatch = url.pathname.match(/^\/api\/projects\/([a-f0-9]+)\/analyze$/);
+  if (projectAnalyzeMatch && request.method === "POST") {
+    if (!isLocalMutation(request)) return json({ error: "Local origin required" }, 403);
+    const project = database.db.query("SELECT id FROM projects WHERE id=?").get(projectAnalyzeMatch[1]) as { id: string } | null;
+    if (!project) return json({ error: "Project not found" }, 404);
+    if (scanState.running) return json({ status: "already_running" }, 202);
+    void runFullScan(config, database, { projectId: project.id }).catch((error) => console.error(error));
+    return json({ status: "started", projectId: project.id }, 202);
+  }
   if (url.pathname === "/api/reports/work" && request.method === "GET") {
     try {
       const range = (url.searchParams.get("range") ?? "today") as WorkReportRange;

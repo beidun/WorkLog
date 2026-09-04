@@ -55,7 +55,12 @@ export type FullScanResult = ScanStats & {
   llmProvider: ProviderRuntimeStatus;
 };
 
-export async function runFullScan(config: AppConfig, database?: WorklogDatabase): Promise<FullScanResult> {
+export interface FullScanOptions {
+  /** Restrict model enhancement to one already-known project. History indexing remains local. */
+  projectId?: string;
+}
+
+export async function runFullScan(config: AppConfig, database?: WorklogDatabase, options: FullScanOptions = {}): Promise<FullScanResult> {
   if (scanState.running) throw new Error("A scan is already running");
   scanState.running = true;
   scanState.error = undefined;
@@ -74,6 +79,7 @@ export async function runFullScan(config: AppConfig, database?: WorklogDatabase)
     const provider = createModelProvider(config.llm);
     const digests = await rebuildSessionDigests(db, {
       provider,
+      projectId: options.projectId,
       maxModelSessions: config.llm.maxSessionsPerScan,
       retryFailed: config.llm.retryFailed,
       // A live scan gets one bounded transient retry; direct library callers
@@ -92,6 +98,7 @@ export async function runFullScan(config: AppConfig, database?: WorklogDatabase)
     let workItemAgentsManual = 0;
     if (provider) {
       const itemAgents = await runWorkItemAgents(db, provider, {
+        projectId: options.projectId,
         maxWorkItems: config.llm.maxWorkItemsPerScan,
         retryFailed: config.llm.retryFailed,
         agentMaxAttempts: 2,
@@ -120,11 +127,12 @@ export async function runFullScan(config: AppConfig, database?: WorklogDatabase)
       const projects = db.db.query(`
         SELECT id,name FROM projects
         WHERE EXISTS (SELECT 1 FROM work_items wi WHERE wi.project_id=projects.id)
+          AND (? IS NULL OR projects.id=?)
         ORDER BY CASE WHEN EXISTS (
           SELECT 1 FROM work_items priority_wi
           WHERE priority_wi.project_id=projects.id AND priority_wi.status IN ('blocked','partially_done','done_unverified','in_progress')
         ) THEN 0 ELSE 1 END, last_activity_at DESC
-      `).all() as Array<{ id: string; name: string }>;
+      `).all(options.projectId ?? null, options.projectId ?? null) as Array<{ id: string; name: string }>;
       const projectLimit = config.llm.maxProjectsPerScan;
       let projectAttempts = 0;
       for (const project of projects) {

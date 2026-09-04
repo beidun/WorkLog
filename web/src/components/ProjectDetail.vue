@@ -4,8 +4,8 @@ import { api } from "../api";
 import type { EvidenceRef, ProjectCorrectionPayload, ProjectDetailResponse, ProjectWorkstream, TimelineEvent, WorkItem, WorkItemCorrectionPayload, WorkItemFeedbackType } from "../types";
 import AppIcon from "./AppIcon.vue";
 
-const props = defineProps<{ detail: ProjectDetailResponse; focusWorkItemId: string | null; loading: boolean }>();
-const emit = defineEmits<{ close: []; evidence: [event: TimelineEvent | EvidenceRef]; changed: [] }>();
+const props = defineProps<{ detail: ProjectDetailResponse; focusWorkItemId: string | null; loading: boolean; analyzing: boolean; analyzeError: string }>();
+const emit = defineEmits<{ close: []; evidence: [event: TimelineEvent | EvidenceRef]; changed: []; analyze: [] }>();
 const editingId = ref<string | null>(null);
 const savingId = ref<string | null>(null);
 const correctionError = ref("");
@@ -150,9 +150,13 @@ const factLabels = { finding: "结论", change: "变更", validation: "验证", 
     <aside class="detail-drawer" aria-label="项目详情">
       <header class="drawer-header">
         <div><p>项目进度</p><h2>{{ detail.project.name }}</h2><span>{{ detail.project.root_path }}</span></div>
-        <button class="icon-button" aria-label="关闭" @click="emit('close')"><AppIcon name="close" /></button>
+        <div class="drawer-header-actions">
+          <button class="project-analyze-button" :disabled="analyzing || loading" @click="emit('analyze')"><AppIcon name="scan" />{{ analyzing ? '分析中…' : '重新分析' }}</button>
+          <button class="icon-button" aria-label="关闭" @click="emit('close')"><AppIcon name="close" /></button>
+        </div>
       </header>
       <div class="drawer-body">
+        <p v-if="analyzeError" class="project-analyze-error" role="alert">重新分析失败：{{ analyzeError }}</p>
         <section v-if="detail.progress" class="project-progress-section">
           <div class="project-progress-heading">
             <div><span class="progress-kicker">项目级判断</span><h3>{{ detail.progress.headline }}</h3></div>

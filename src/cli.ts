@@ -16,6 +16,22 @@ if (command === "scan") {
   console.log("Scanning Codex and Claude Code history…");
   const result = await runFullScan(config);
   console.log(JSON.stringify(result, null, 2));
+} else if (command === "scan-project") {
+  const projectName = process.argv.slice(3).join(" ").trim();
+  if (!projectName) throw new Error("Usage: bun src/cli.ts scan-project <project name>");
+  const db = new WorklogDatabase(config.databasePath);
+  const project = db.db.query("SELECT id,name FROM projects WHERE name=? COLLATE NOCASE LIMIT 1").get(projectName) as { id: string; name: string } | null;
+  if (!project) {
+    db.close();
+    throw new Error(`Project not found: ${projectName}`);
+  }
+  console.log(`Scanning project ${project.name} with the Agent…`);
+  try {
+    const result = await runFullScan(config, db, { projectId: project.id });
+    console.log(JSON.stringify(result, null, 2));
+  } finally {
+    db.close();
+  }
 } else if (command === "serve") {
   await import("./server");
 } else if (command === "status" || command === "projects") {
@@ -100,5 +116,5 @@ if (command === "scan") {
     },
   }, null, 2));
 } else {
-  console.log(`Agent Worklog\n\nCommands:\n  scan                         Scan Codex and Claude Code history\n  serve                        Start local API and Web UI\n  status                       Show all project progress\n  daily [YYYY-MM-DD]           Generate a summary for one date\n  report [today|yesterday|week] Generate a time-range work summary\n  prompts                      Print the three active Agent system prompts\n  eval [path]                  Run deterministic digest regression cases\n  eval-score                   Score reviewed work-item feedback\n  discover-llm                 Show safe ccswitch model configuration\n  export-eval [path] [--all]   Export reviewed work-item evaluation cases`);
+  console.log(`Agent Worklog\n\nCommands:\n  scan                         Scan Codex and Claude Code history\n  scan-project <name>          Only send one project's events to the Agent\n  serve                        Start local API and Web UI\n  status                       Show all project progress\n  daily [YYYY-MM-DD]           Generate a summary for one date\n  report [today|yesterday|week] Generate a time-range work summary\n  prompts                      Print the three active Agent system prompts\n  eval [path]                  Run deterministic digest regression cases\n  eval-score                   Score reviewed work-item feedback\n  discover-llm                 Show safe ccswitch model configuration\n  export-eval [path] [--all]   Export reviewed work-item evaluation cases`);
 }

@@ -102,11 +102,17 @@ function verifyResult(result: SessionDigestResult, input: SessionDigestInput, pl
   if (result.evidenceIds.some((id) => !allowed.has(id)) || result.evidenceIds.length === 0) {
     throw new Error("Agent returned an invalid evidence set");
   }
+  if (result.facts?.some((fact) => !result.evidenceIds.includes(fact.eventId))) {
+    throw new Error("Agent facts must cite one of its evidenceIds");
+  }
   let verified = result;
   if (input.baseline.openTurn && !["in_progress", "partially_done"].includes(verified.status)) {
     verified = { ...verified, status: verified.status === "blocked" ? "partially_done" : "in_progress" };
   }
   if (verified.status === "verified" && (verified.blockers.length > 0 || verified.remaining.length > 0 || verified.nextStep)) {
+    verified = { ...verified, status: "done_unverified" };
+  }
+  if (verified.status === "verified" && verified.facts?.some((fact) => fact.kind === "next_step")) {
     verified = { ...verified, status: "done_unverified" };
   }
   if (verified.status === "verified" && input.baseline.status !== "verified" && !supportsCompletion(verified, input)) {

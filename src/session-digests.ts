@@ -621,20 +621,48 @@ function hasVerifiedEvidence(result: SessionDigestResult, events: EventRow[]): b
   });
 }
 
+function modelFacts(result: SessionDigestResult, baseline: SessionDigest): SessionFact[] {
+  const facts: SessionFact[] = (result.facts ?? []).map((fact, index) => ({
+    kind: fact.kind,
+    text: fact.text,
+    eventId: fact.eventId,
+    // Model facts are semantic interpretations, but remain below the hard
+    // evidence gate. Deterministic facts are retained only as a fallback for
+    // fields the provider did not return.
+    confidence: Math.max(0.82, 0.96 - index * 0.015),
+  }));
+  const seen = new Set(facts.map((fact) => `${fact.kind}:${fact.text.toLocaleLowerCase()}`));
+  for (const fact of baseline.facts) {
+    const key = `${fact.kind}:${fact.text.toLocaleLowerCase()}`;
+    if (!seen.has(key)) {
+      facts.push(fact);
+      seen.add(key);
+    }
+  }
+  return facts.slice(0, 24);
+}
+
 function applyModelResult(baseline: SessionDigest, result: SessionDigestResult, events: EventRow[], provider: WorklogModelProvider): SessionDigest {
   const status = supportedModelStatus(result, baseline, events);
+  const facts = modelFacts(result, baseline).filter((fact) => {
+    if (["verified", "abandoned"].includes(status) && ["risk", "next_step"].includes(fact.kind)) return false;
+    return true;
+  });
+  const factCompleted = facts.filter((fact) => fact.kind === "change").map((fact) => fact.text);
+  const factValidations = facts.filter((fact) => fact.kind === "validation").map((fact) => fact.text);
   const evidence = [...baseline.evidence, ...result.evidenceIds.map((eventId) => ({ eventId, section: "progress" as const }))];
   return {
     ...baseline,
     headline: result.headline,
     progressSummary: result.progressSummary,
-    completed: result.completed,
-    validations: [...new Set([...baseline.validations, ...result.validations])].slice(0, 6),
+    completed: [...new Set([...result.completed, ...factCompleted])].slice(0, 6),
+    validations: [...new Set([...baseline.validations, ...result.validations, ...factValidations])].slice(0, 6),
     blockers: status === "blocked" ? result.blockers : [],
     remaining: ["verified", "abandoned"].includes(status) ? [] : result.remaining,
     status,
     confidence: Math.max(baseline.confidence, 0.82),
     nextStep: result.nextStep,
+    facts,
     provider: provider.name,
     evidence: [...new Map(evidence.map((item) => [`${item.eventId}:${item.section}`, item])).values()],
   };
@@ -670,6 +698,8 @@ function saveDigest(database: WorklogDatabase, digest: SessionDigest): void {
 
 export interface DigestRebuildOptions {
   provider?: WorklogModelProvider | null;
+  /** Restrict model enhancement to one project without sending other projects' events. */
+  projectId?: string;
   maxModelSessions?: number;
   retryFailed?: boolean;
   /** Maximum attempts per Agent run. Kept at one by default for deterministic callers. */
@@ -693,6 +723,7 @@ export async function rebuildSessionDigests(database: WorklogDatabase, options: 
     SELECT s.id, COALESCE(p.name, 'Unknown project') AS project_name FROM sessions s
     LEFT JOIN projects p ON p.id=s.project_id
     WHERE EXISTS (SELECT 1 FROM events e WHERE e.session_id=s.id AND e.event_type='user_message' AND e.content IS NOT NULL AND trim(e.content)<>'')
+      AND (? IS NULL OR s.project_id=?)
     -- Spend the bounded model budget on uncertain work first. A pure
     -- newest-first order wastes all 20 slots on already verified audits and
     -- leaves the genuinely unfinished sessions on deterministic fallback.
@@ -702,7 +733,7 @@ export async function rebuildSessionDigests(database: WorklogDatabase, options: 
         AND previous.status IN ('in_progress','partially_done','blocked','done_unverified')
     ) THEN 0 ELSE 1 END,
     COALESCE(s.ended_at,s.started_at) DESC
-  `).all() as Array<{ id: string; project_name: string }>;
+  `).all(options.projectId ?? null, options.projectId ?? null) as Array<{ id: string; project_name: string }>;
   let rebuilt = 0;
   let skipped = 0;
   let enhanced = 0;

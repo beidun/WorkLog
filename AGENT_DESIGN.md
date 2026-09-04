@@ -20,12 +20,13 @@ Worklog Agent 将本地对话和工具事件转换成可追溯的会话事实、
 - `observe`：接收扫描器产生的真实事件，识别用户目标、对话尾部、工具调用和成功/失败结果。
 - `plan`：生成重点事件 ID、待回答问题和硬约束。计划不会替代证据，只负责缩小推理范围。
 - `reason`：将基线摘要、计划和脱敏事件发送给 Provider，要求返回结构化 Digest。
+- `reason` 是会话语义主路径：除摘要字段外，Provider 应返回逐条绑定真实 event ID 的 `facts`（finding/change/validation/risk/next_step），让后续事项聚合消费模型理解后的原子事实。
 - `verify`：检查所有 `evidenceIds` 是否存在、是否与计划有交集、状态是否允许跃迁、开放回合是否误报完成、阻塞/待办是否与结果一致。
 - `commit`：只有验证通过才写入 `session_digests`、`session_facts` 和证据关联表。
 
 Provider 不是三层共用一个无上下文的提示词：调用会显式携带 `role=session`，并使用 Session Agent 提示词，要求提取单个会话的目标、原子事实、验证、阻塞和下一步。
 
-模型失败、超时、截断 JSON 或引用非法时，保留确定性 Digest，并将失败写入 `agent_runs` / `agent_run_steps`。
+模型失败、超时、截断 JSON 或事实引用非法时，保留确定性 Digest，并将失败写入 `agent_runs` / `agent_run_steps`。启用 Provider 时，确定性结果只作为基线和安全门；模型返回的语义字段与原子 facts 优先展示。
 
 ### 项目 Agent
 

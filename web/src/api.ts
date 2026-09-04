@@ -39,6 +39,7 @@ export const api = {
   daily: (date?: string) => request<WorkReport>(`/api/reports/daily${date ? `?date=${encodeURIComponent(date)}` : ""}`),
   workReport: (range: WorkReportRange) => request<WorkReport>(`/api/reports/work?range=${range}`),
   scan: () => request<{ status: string }>("/api/scan", { method: "POST" }),
+  analyzeProject: (id: string) => request<{ status: string; projectId?: string }>(`/api/projects/${encodeURIComponent(id)}/analyze`, { method: "POST" }),
   scanStatus: () => request<Record<string, any>>("/api/scan/status"),
   agentRuns: (limit = 20) => request<{ runs: AgentRun[] }>(`/api/agent/runs?limit=${limit}`),
   agentRun: (id: string) => request<AgentRunDetails>(`/api/agent/runs/${encodeURIComponent(id)}`),

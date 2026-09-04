@@ -42,11 +42,14 @@ function input() {
 
 describe("OpenAI-compatible digest provider", () => {
   test("exposes distinct inspectable prompts for the three Agent layers", () => {
-    expect(AGENT_PROMPT_VERSION).toBe("worklog-digest-v3-role-prompts");
+    expect(AGENT_PROMPT_VERSION).toBe("worklog-digest-v4-semantic-facts");
     const session = agentSystemPrompt("session");
     const workItem = agentSystemPrompt("work_item");
     const project = agentSystemPrompt("project");
     expect(session).toContain("Session Agent");
+    expect(session).toContain("原子语义事实");
+    expect(session).toContain("读取成功、列目录、查询返回数据");
+    expect(session).toContain("facts");
     expect(workItem).toContain("Work Item Agent");
     expect(project).toContain("Project Agent");
     expect(new Set([session, workItem, project]).size).toBe(3);
@@ -80,6 +83,47 @@ describe("OpenAI-compatible digest provider", () => {
     expect(requestBody).toContain('"max_tokens":8192');
     expect(result.status).toBe("done_unverified");
     expect(result.evidenceIds).toEqual(["event-progress"]);
+  });
+
+  test("accepts source-linked semantic facts from the session Agent", async () => {
+    const provider = new OpenAICompatibleProvider(config(), async () => Response.json({
+      choices: [{ message: { content: JSON.stringify({
+        headline: "修复增量扫描器",
+        progressSummary: "扫描器已修复，但仍需回归验证。",
+        completed: ["修复扫描器状态判断"], validations: [], blockers: [], remaining: ["运行回归测试"],
+        status: "done_unverified", nextStep: "运行回归测试。", evidenceIds: ["event-progress"],
+        facts: [
+          { kind: "change", text: "扫描器状态判断已修复", eventId: "event-progress" },
+          { kind: "next_step", text: "仍需运行回归测试", eventId: "event-progress" },
+        ],
+      }) } }] }));
+    const result = await provider.digestSession(input());
+    expect(result.facts).toEqual([
+      { kind: "change", text: "扫描器状态判断已修复", eventId: "event-progress" },
+      { kind: "next_step", text: "仍需运行回归测试", eventId: "event-progress" },
+    ]);
+  });
+
+  test("normalizes common Chinese fact kinds and wire aliases", async () => {
+    const provider = new OpenAICompatibleProvider(config(), async () => Response.json({ choices: [{ message: { content: JSON.stringify({
+      headline: "文档审核", progressSummary: "文档审核已完成。", completed: [], validations: [], blockers: [], remaining: [],
+      status: "verified", nextStep: "", evidenceIds: ["event-progress"], facts: [
+        { type: "验证", text: "文档格式校验通过。", event_id: "event-progress" },
+        { kind: "风险", text: "没有发现发布阻塞。", evidenceId: "event-progress" },
+      ],
+    }) } }] }));
+    const result = await provider.digestSession(input());
+    expect(result.facts?.map((fact) => fact.kind)).toEqual(["validation", "risk"]);
+  });
+
+  test("rejects a semantic fact whose event is not in evidenceIds", async () => {
+    const provider = new OpenAICompatibleProvider(config(), async () => Response.json({
+      choices: [{ message: { content: JSON.stringify({
+        headline: "修复增量扫描器", progressSummary: "仍需验证。", completed: [], validations: [], blockers: [], remaining: ["验证"],
+        status: "in_progress", nextStep: "运行测试。", evidenceIds: ["event-progress"],
+        facts: [{ kind: "finding", text: "用户目标是修复扫描器", eventId: "event-user" }],
+      }) } }] }));
+    await expect(provider.digestSession(input())).rejects.toThrow("facts must cite");
   });
 
   test("sends the explicit Agent role so each layer receives its own prompt", async () => {

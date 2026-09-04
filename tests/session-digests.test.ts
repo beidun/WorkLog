@@ -528,6 +528,31 @@ describe("session digest", () => {
     db.close();
   });
 
+  test("persists Agent semantic facts ahead of deterministic fallback facts", async () => {
+    const { db, add } = fixture();
+    add("user_message", { role: "user", content: "分析接口返回异常的根因" });
+    const evidenceId = add("assistant_message", { role: "assistant", content: "根因是上游字段为空导致解析分支报错。" });
+    const provider: WorklogModelProvider = {
+      name: "fake:facts", cacheKey: "fake-facts-v1",
+      async digestSession(): Promise<SessionDigestResult> {
+        return {
+          headline: "定位接口异常根因", progressSummary: "已定位为空字段触发解析分支，仍需修复调用方。",
+          completed: ["定位为空字段根因"], validations: [], blockers: [], remaining: ["修复调用方"],
+          status: "done_unverified", nextStep: "修复调用方的空字段处理。", evidenceIds: [evidenceId],
+          facts: [
+            { kind: "finding", text: "上游空字段触发了解析分支异常", eventId: evidenceId },
+            { kind: "next_step", text: "修复调用方的空字段处理", eventId: evidenceId },
+          ],
+        };
+      },
+    };
+    await rebuildSessionDigests(db, { provider });
+    const facts = db.db.query("SELECT fact_kind,text,event_id FROM session_facts ORDER BY rank").all() as Array<any>;
+    expect(facts[0]).toEqual({ fact_kind: "finding", text: "上游空字段触发了解析分支异常", event_id: evidenceId });
+    expect(facts.some((fact) => fact.fact_kind === "next_step" && fact.text.includes("空字段处理"))).toBeTrue();
+    db.close();
+  });
+
   test("allows the Agent to verify rule-derived progress with successful evidence", async () => {
     const { db, add } = fixture();
     add("user_message", { role: "user", content: "修复扫描器并运行测试" });

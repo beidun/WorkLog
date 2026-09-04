@@ -236,6 +236,7 @@ function hasManualCorrection(database: WorklogDatabase, workItemId: string): boo
 }
 
 export async function runWorkItemAgents(database: WorklogDatabase, provider: WorklogModelProvider, options: {
+  projectId?: string;
   maxWorkItems?: number;
   retryFailed?: boolean;
   agentMaxAttempts?: number;
@@ -247,9 +248,10 @@ export async function runWorkItemAgents(database: WorklogDatabase, provider: Wor
       (SELECT COUNT(*) FROM work_item_evidence wie WHERE wie.work_item_id=wi.id) AS evidenceCount
     FROM work_items wi JOIN projects p ON p.id=wi.project_id
     WHERE (SELECT COUNT(*) FROM work_item_evidence wie WHERE wie.work_item_id=wi.id)>0
+      AND (? IS NULL OR wi.project_id=?)
     ORDER BY CASE wi.status WHEN 'blocked' THEN 0 WHEN 'done_unverified' THEN 1 WHEN 'partially_done' THEN 2 WHEN 'in_progress' THEN 3 WHEN 'planned' THEN 4 ELSE 5 END,
       wi.last_activity_at DESC,wi.id
-  `).all() as Array<ProjectProgressItem & { projectId: string; projectName: string }>;
+  `).all(options.projectId ?? null, options.projectId ?? null) as Array<ProjectProgressItem & { projectId: string; projectName: string }>;
   const stats: WorkItemAgentRunStats = { enhanced: 0, fallback: 0, skipped: 0, deferred: 0, manual: 0 };
   let attempts = 0;
   const maximum = options.maxWorkItems ?? Number.POSITIVE_INFINITY;

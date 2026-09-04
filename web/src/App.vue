@@ -24,6 +24,8 @@ const scanLabel = ref("扫描新记录");
 const detail = ref<ProjectDetailResponse | null>(null);
 const detailFocusId = ref<string | null>(null);
 const detailLoading = ref(false);
+const projectAnalyzing = ref(false);
+const projectAnalyzeError = ref("");
 const evidence = ref<Record<string, any> | null>(null);
 const evidenceOpen = ref(false);
 const evidenceLoading = ref(false);
@@ -97,6 +99,30 @@ async function refreshProject() {
     await Promise.all([loadOverview(), activeSection.value === "review" ? loadReviewQueue() : Promise.resolve()]);
   } finally {
     detailLoading.value = false;
+  }
+}
+
+async function analyzeProject() {
+  const projectId = detail.value?.project.id;
+  if (!projectId || projectAnalyzing.value) return;
+  projectAnalyzing.value = true;
+  projectAnalyzeError.value = "";
+  try {
+    const response = await api.analyzeProject(projectId);
+    if (response.status === "already_running") throw new Error("已有扫描正在运行，请稍后再试。");
+    while (true) {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const state = await api.scanStatus();
+      if (!state.running) {
+        if (state.error) throw new Error(state.error);
+        break;
+      }
+    }
+    await refreshProject();
+  } catch (reason) {
+    projectAnalyzeError.value = reason instanceof Error ? reason.message : String(reason);
+  } finally {
+    projectAnalyzing.value = false;
   }
 }
 
@@ -259,7 +285,7 @@ onMounted(loadOverview);
       </template>
     </main>
 
-    <ProjectDetail v-if="detail" :detail="detail" :focus-work-item-id="detailFocusId" :loading="detailLoading" @close="detail = null; detailFocusId = null" @evidence="openEvidence" @changed="refreshProject" />
+    <ProjectDetail v-if="detail" :detail="detail" :focus-work-item-id="detailFocusId" :loading="detailLoading" :analyzing="projectAnalyzing" :analyze-error="projectAnalyzeError" @close="detail = null; detailFocusId = null" @evidence="openEvidence" @changed="refreshProject" @analyze="analyzeProject" />
     <EvidenceModal v-if="evidenceOpen" :data="evidence" :loading="evidenceLoading" @close="evidenceOpen = false; evidence = null" />
   </div>
 </template>
